@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>SebLague Style Dragon Earth v2</title>
+<title>SebLague Style Dragon Earth v2 — Phase 2 Clouds</title>
 <style>
   html,body{margin:0;height:100%;overflow:hidden;background:#02040a;font-family:Arial,Helvetica,sans-serif;color:#dcefff;}
   #c{display:block;width:100vw;height:100vh;}
@@ -15,6 +15,9 @@
   .pill{background:rgba(0,0,0,.55);border:1px solid rgba(255,200,112,.32);border-radius:8px;padding:8px 12px;color:#ffcf77;font:12px/1.25 monospace;backdrop-filter:blur(4px)}
   #hint{position:fixed;display:none;bottom:14px;left:50%;transform:translateX(-50%);z-index:4;white-space:nowrap;color:#b9d7e7;background:rgba(0,0,0,.55);border:1px solid rgba(255,200,112,.25);border-radius:8px;padding:8px 14px;font-size:12px}
   #status{position:fixed;display:none;left:12px;bottom:12px;max-width:75vw;z-index:5;background:rgba(0,0,0,.62);color:#9df49d;border-radius:6px;padding:6px 9px;font:12px monospace}
+  #cloudFog{position:fixed;inset:0;z-index:3;pointer-events:none;background:radial-gradient(ellipse at 50% 40%,rgba(240,245,255,0.55) 0%,rgba(200,215,235,0.85) 60%,rgba(180,200,225,0.95) 100%);opacity:0;}
+  #cloudH{transition:color 0.4s;}
+  #lightningFlash{position:fixed;inset:0;z-index:6;pointer-events:none;background:#fff;opacity:0;}
 </style>
 </head>
 <body>
@@ -24,8 +27,10 @@
   <p>Clean rebuilt renderer: separate land/ocean/color/topography/coast/foam layers, flat oceans with bathymetry color, smoothed continents, visible softened elevations, and true Three.js mesh shadow: animated wing flaps cast onto a tangent receiver.</p>
   <button id="go">TAKE FLIGHT</button>
 </div>
-<div id="hud"><div class="pill" id="speedH">Speed</div><div class="pill" id="altH">Altitude</div><div class="pill" id="locH">SebLague-style Earth</div></div>
-<div id="hint">↑ thrust forward · ↓ slow down · ←/→ steer · W/S altitude · SPACE fire · B dolphin borders · C clouds · Mouse drag camera · Wheel zoom · R reset</div>
+<div id="hud"><div class="pill" id="speedH">Speed</div><div class="pill" id="altH">Altitude</div><div class="pill" id="cloudH">☁ Clear</div><div class="pill" id="weatherH" style="display:none">🌧</div><div class="pill" id="locH">SebLague-style Earth</div></div>
+<div id="cloudFog"></div>
+<div id="lightningFlash"></div>
+<div id="hint">↑ thrust · ↓ slow · ←/→ steer · W/S altitude · SPACE fire · T camera · B dolphin borders · C clouds · V debug · Mouse drag rotate · Wheel zoom · R reset</div>
 <div id="status"></div>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
@@ -71,6 +76,38 @@ let dolphinAllowedDirections=[];
 let dolphinFoamTexture=null, dolphinRippleTexture=null, dolphinDropletTexture=null, dolphinWakeTexture=null;
 let dolphinSpawnBorderMesh=null, dolphinSpawnBorderVisible=false;
 let cloudRoot=null, cloudShadowRoot=null, cloudsVisible=true;
+// Shared puff geometry and materials — hoisted so regrowth spawner can use them
+let _puffGeo=null, _puffMats=null;
+
+// ── Phase 2: cloud collision state ───────────────────────────────────────
+// Each cloud bank gets a bounding sphere used for fast dragon overlap tests.
+// inCloudDepth: 0 = clear air, 1 = fully inside cloud (drives fog overlay).
+// cloudTurbulence: applied as a small random nudge to dragon each frame when inside.
+const CLOUD_BSPHERES=[];      // [{center:Vector3, radius:Number, bankIdx}]
+let inCloudDepth=0;
+let cloudFogTarget=0;
+let cloudTurbulenceAccum=new THREE.Vector3();
+let insideCloudBanks=[];
+let cloudCollisionReady=false;
+
+// Per-puff narrow-phase data — built alongside CLOUD_BSPHERES
+// PUFF_BY_BANK[bi] = array of {mesh, worldPos (current), radius}
+const PUFF_BY_BANK=[];
+
+// ── Phase 3: weather system — rain + lightning per cloud bank ─────────────
+// Each bank can independently be a storm cloud.
+// WEATHER[bi] = { raining, lightning, rainTimer, lightningTimer, lightningFlashT,
+//                 rainParticles (Points), lightningGroup (Group) }
+const WEATHER = [];
+let _weatherInitDone = false;
+const _flashEl = document.getElementById('lightningFlash');
+const _weatherHudEl = document.getElementById('weatherH');
+// How many banks are storm clouds at once (random selection, changes over time)
+const STORM_COUNT_MIN = 2;
+const STORM_COUNT_MAX = 6;
+let _stormBanks = new Set();       // currently active storm bank indices
+let _stormReshuffleTimer = 0;
+const STORM_RESHUFFLE_INTERVAL = 45; // seconds between storm pattern changes
 let dolphinNextPodId=1;
 const dolphins=[];
 const _fireWorldPos=new THREE.Vector3(), _fireWorldQuat=new THREE.Quaternion(), _fireLocalOffset=new THREE.Vector3(), _fireLocalRotQuat=new THREE.Quaternion();
@@ -134,7 +171,9 @@ const earthR=10;
 let radial=new THREE.Vector3(0.20,0.55,0.81).normalize();
 let forward=new THREE.Vector3(0,0,1), right=new THREE.Vector3();
 let altitude=0.76,minAlt=0.30,maxAlt=5.4,speed=0.032,targetSpeed=0.032,maxSpeed=0.115,flyAnimSpeed=1.0;
-let camYaw=0,camPitch=0.14,camDist=3.20,dragging=false,mx=0,my=0,keys={};
+let camYaw=0,camPitch=Math.PI/2,camDist=3.80,dragging=false,mx=0,my=0,keys={};
+// Camera modes: 'top' = top-down (default), 'follow' = classic behind-dragon
+let camMode='top';
 let collisionDebug=false, debugRoot=null;
 function status(s){statusEl.style.display='block';statusEl.textContent=s;console.log(s)}
 function clamp(x,a,b){return Math.max(a,Math.min(b,x))}
@@ -174,11 +213,13 @@ function makeClouds(){
   // while very soft low-opacity mist sprites inside each bank blur the visible
   // intersections so the cluster reads as one fluffy cloud instead of separate balls.
   const puffGeo=new THREE.SphereBufferGeometry(1,20,14);
+  _puffGeo = puffGeo;
   const mats=[
     new THREE.MeshLambertMaterial({color:0xffffff,transparent:false,depthWrite:true}),
     new THREE.MeshLambertMaterial({color:0xf4f6f8,transparent:false,depthWrite:true}),
     new THREE.MeshLambertMaterial({color:0xe8edf2,transparent:false,depthWrite:true})
   ];
+  _puffMats = mats;
   const mistCanvas=document.createElement('canvas');
   mistCanvas.width=mistCanvas.height=128;
   const ctx=mistCanvas.getContext('2d');
@@ -290,10 +331,496 @@ function makeClouds(){
       puff.quaternion.copy(q);
       puff.rotateY(a);
       puff.userData.home=pos.clone();
+      // ── Phase 2 per-puff data ──────────────────────────────────────────
+      puff.userData.bankIdx   = bi;
+      puff.userData.puffIdx   = i;
+      puff.userData.puffR     = Math.max(puff.scale.x, puff.scale.y, puff.scale.z); // bsphere radius
+      puff.userData.homeDir   = pos.clone().normalize();
+      puff.userData.homeAlt   = pos.length() - earthR;
+      // Scatter state
+      puff.userData.scattered    = false;
+      puff.userData.scatterVel   = new THREE.Vector3(); // current velocity
+      puff.userData.scatterLife  = 0;   // 0=resting, >0=scattered, counts up
+      puff.userData.scatterMax   = 3.2 + Math.random()*1.8; // seconds until reform
+      puff.userData.baseScale    = puff.scale.clone();
+      puff.userData.origOpacity  = 1.0; // for fade-out/in
       group.add(puff);
     }
   });
   status('Phase 1.3 clouds ready: rounded global cumulus clusters with soft shadows and slow wind drift');
+  // ── Phase 2: build per-bank bounding spheres for collision ───────────────
+  buildCloudBoundingSpheres();
+}
+
+// ── Phase 2: bounding sphere builder ────────────────────────────────────────
+// Called once after makeClouds. Uses the IDENTICAL rnd() function and seed sequences
+// as makeClouds so bsphere wind params match the visible cloud groups exactly.
+function buildCloudBoundingSpheres(){
+  // Must match the rnd() used in makeClouds / buildGlobalRoundCloudBanks exactly.
+  function rnd(seed){let x=Math.sin(seed*12.9898)*43758.5453;return x-Math.floor(x);}
+
+  CLOUD_BSPHERES.length=0;
+  CLOUD_BANKS.forEach((bank,bi)=>{
+    const center=latLonToDir(bank.lat,bank.lon);
+
+    // Radius: covers full puff footprint (rx in tangent world-units) +
+    // max puff sphere radius (0.27) + altitude spread (±0.14) + small pad.
+    const footprintR = Math.max(bank.rx, bank.ry) * 1.25; // slightly generous
+    const puffR      = 0.28;   // max puff scale base 0.095+0.175=0.27, round up
+    const altSpread  = 0.15;   // puffs vary ±0.14 in alt
+    const padding    = 0.10;
+    const radius     = footprintR + puffR + altSpread + padding;
+
+    const worldCenter = center.clone().multiplyScalar(earthR + bank.alt);
+
+    // ── Wind params: MUST match makeClouds group.userData exactly ──────────
+    // makeClouds seeds: windAxis uses (bi+1)*111 and (bi+1)*127
+    //                   windSpeed uses (bi+1)*139 and (bi+1)*149 for sign
+    //                   windPhase uses (bi+1)*157
+    const windAxisX = (rnd((bi+1)*111) - 0.5) * 0.26;
+    const windAxisZ = (rnd((bi+1)*127) - 0.5) * 0.26;
+    const windAxis  = new THREE.Vector3(windAxisX, 1.0, windAxisZ).normalize();
+    const windSpeed = (0.00030 + rnd((bi+1)*139)*0.00042) * (rnd((bi+1)*149)>0.5 ? 1 : -1);
+    const windPhase = rnd((bi+1)*157) * Math.PI * 2;
+
+    CLOUD_BSPHERES.push({
+      center:     worldCenter,
+      centerDir:  center.clone(),
+      radius,
+      bankIdx:    bi,
+      windAxis,
+      windSpeed,
+      windPhase,
+      currentCenter: worldCenter.clone(),
+    });
+  });
+  cloudCollisionReady=true;
+  status('Phase 2: '+CLOUD_BSPHERES.length+' cloud bounding spheres built — collision active');
+
+  // ── Build per-puff narrow-phase lookup ────────────────────────────────────
+  // Walk the already-built cloudRoot groups and collect every puff mesh
+  // (MeshType objects that have userData.puffIdx set).
+  PUFF_BY_BANK.length=0;
+  for(let bi=0;bi<CLOUD_BANKS.length;bi++) PUFF_BY_BANK.push([]);
+
+  if(cloudRoot){
+    cloudRoot.children.forEach(group=>{
+      group.children.forEach(child=>{
+        if(child.isMesh && child.userData.bankIdx !== undefined){
+          const bi=child.userData.bankIdx;
+          PUFF_BY_BANK[bi].push({
+            mesh:      child,
+            worldPos:  new THREE.Vector3(), // updated each frame
+            radius:    child.userData.puffR,
+          });
+        }
+      });
+    });
+  }
+  let totalPuffs=PUFF_BY_BANK.reduce((s,a)=>s+a.length,0);
+  status('Phase 2 hybrid: '+CLOUD_BSPHERES.length+' bank bspheres + '+totalPuffs+' per-puff narrow-phase entries');
+}
+
+// ── Phase 2: cloud regrowth — banks below MIN_PUFFS grow new puffs ──────────
+const MIN_PUFFS = 3;
+let _regrowthTimer = 0;
+const REGROWTH_INTERVAL = 4.0;
+
+// Spawn `count` new puffs into bank bi, starting at scale 0 and growing in.
+function spawnRegrowthPuffs(bi, count){
+  if(!cloudRoot || !_puffGeo || !_puffMats) return;
+  const bank  = CLOUD_BANKS[bi];
+  const group = cloudRoot.children[bi];
+  const puffs = PUFF_BY_BANK[bi];
+  if(!bank || !group || !puffs) return;
+
+  function rnd(seed){let x=Math.sin(seed*12.9898)*43758.5453;return x-Math.floor(x);}
+
+  const center = latLonToDir(bank.lat, bank.lon);
+  const east   = new THREE.Vector3(
+    Math.cos(THREE.MathUtils.degToRad(bank.lon)), 0,
+    -Math.sin(THREE.MathUtils.degToRad(bank.lon))
+  ).normalize();
+  const north  = new THREE.Vector3().crossVectors(east, center).normalize();
+
+  for(let n = 0; n < count; n++){
+    const a   = Math.random() * Math.PI * 2;
+    const rr  = Math.sqrt(Math.random());
+    const x   = Math.cos(a) * bank.rx * rr;
+    const y   = Math.sin(a) * bank.ry * rr;
+    const d   = center.clone()
+      .addScaledVector(east,  x / earthR)
+      .addScaledVector(north, y / earthR)
+      .normalize();
+    const alt = bank.alt + (Math.random()-0.5)*0.14;
+    const pos = d.clone().multiplyScalar(earthR + alt);
+
+    const base    = 0.095 + Math.random()*0.175;
+    const newPuff = new THREE.Mesh(_puffGeo, _puffMats[Math.floor(Math.random()*3)]);
+    newPuff.position.copy(pos);
+    newPuff.scale.set(0,0,0); // start invisible, grows via puff animation
+
+    const q = new THREE.Quaternion()
+      .setFromUnitVectors(new THREE.Vector3(0,1,0), pos.clone().normalize());
+    newPuff.quaternion.copy(q);
+    newPuff.rotateY(a);
+
+    const bs = new THREE.Vector3(
+      base*(0.92+Math.random()*0.20),
+      base*(0.86+Math.random()*0.22),
+      base*(0.90+Math.random()*0.20)
+    );
+    newPuff.userData.home       = pos.clone();
+    newPuff.userData.bankIdx    = bi;
+    newPuff.userData.puffIdx    = puffs.length;
+    newPuff.userData.puffR      = Math.max(bs.x, bs.y, bs.z);
+    newPuff.userData.homeDir    = pos.clone().normalize();
+    newPuff.userData.homeAlt    = alt;
+    newPuff.userData.scattered  = true;    // use scatter Phase B to grow in
+    newPuff.userData.dead       = false;
+    newPuff.userData.scatterVel = new THREE.Vector3();
+    newPuff.userData.scatterLife= 1.2;     // skip Phase A, go straight to puff-up
+    newPuff.userData.scatterMax = 3.0 + Math.random()*2.0;
+    newPuff.userData.baseScale  = bs;
+    newPuff.userData.lastTick   = clock.elapsedTime;
+
+    group.add(newPuff);
+    puffs.push({ mesh: newPuff, worldPos: new THREE.Vector3(), radius: newPuff.userData.puffR });
+  }
+}
+
+// Periodic check: catches any edge cases the immediate trigger missed
+function updateCloudRegrowth(dt){
+  if(!cloudCollisionReady || !cloudRoot || !_puffGeo || !_puffMats) return;
+  _regrowthTimer += dt;
+  if(_regrowthTimer < REGROWTH_INTERVAL) return;
+  _regrowthTimer = 0;
+
+  CLOUD_BANKS.forEach((bank, bi)=>{
+    const puffs = PUFF_BY_BANK[bi];
+    if(!puffs) return;
+    // Exclude dead AND currently scattered (both invisible to the player)
+    const alive  = puffs.filter(pe=>pe.mesh && !pe.mesh.userData.dead && !pe.mesh.userData.scattered).length;
+    const needed = Math.max(0, MIN_PUFFS - alive);
+    if(needed > 0) spawnRegrowthPuffs(bi, needed);
+  });
+}
+
+
+// ── Phase 3: Weather system ──────────────────────────────────────────────────
+
+function initWeather(){
+  if(_weatherInitDone || !cloudRoot) return;
+  _weatherInitDone = true;
+
+  // Build per-bank weather state
+  for(let bi=0;bi<CLOUD_BANKS.length;bi++){
+    WEATHER.push({
+      raining:       false,
+      lightning:     false,
+      rainTimer:     0,
+      lightningTimer: 2 + Math.random()*4,
+      lightningFlashT: -1,
+      rainParticles: null,
+      lightningGroup: null,
+    });
+  }
+  reshuffleStorms();
+}
+
+function reshuffleStorms(){
+  // Randomly pick 2–6 banks to be storm clouds
+  const count = STORM_COUNT_MIN + Math.floor(Math.random()*(STORM_COUNT_MAX-STORM_COUNT_MIN+1));
+  const indices = Array.from({length:CLOUD_BANKS.length},(_,i)=>i);
+  // Fisher-Yates shuffle then take first `count`
+  for(let i=indices.length-1;i>0;i--){
+    const j=Math.floor(Math.random()*(i+1));
+    [indices[i],indices[j]]=[indices[j],indices[i]];
+  }
+  const prev = new Set(_stormBanks);
+  _stormBanks = new Set(indices.slice(0,count));
+
+  // Darken puffs of new storm banks, restore old ones
+  _stormBanks.forEach(bi=>{
+    if(!prev.has(bi)) darkenCloud(bi, true);
+  });
+  prev.forEach(bi=>{
+    if(!_stormBanks.has(bi)) darkenCloud(bi, false);
+  });
+}
+
+function darkenCloud(bi, dark){
+  if(!cloudRoot || !cloudRoot.children[bi]) return;
+  const group = cloudRoot.children[bi];
+  group.children.forEach(child=>{
+    const mat = child.material;
+    if(!mat) return;
+    // Cover both solid Mesh puffs and mist Sprites
+    if(!child.userData._origColor){
+      child.userData._origColor = mat.color ? mat.color.clone() : new THREE.Color(1,1,1);
+    }
+    if(dark){
+      if(!child.userData._matCloned){
+        child.material = mat.clone();
+        child.userData._matCloned = true;
+      }
+  child.material.color.setRGB(0.22, 0.23, 0.26); // dark nimbostratus grey
+    } else {
+      if(child.userData._origColor && child.userData._matCloned){
+        child.material.color.copy(child.userData._origColor);
+      }
+    }
+  });
+}
+
+// Build rain particle system anchored to a cloud bank's current world position
+function makeRainForBank(bi){
+  const w = WEATHER[bi];
+  if(w.rainParticles) return; // already exists
+
+  const DROP_COUNT = 180;
+  const positions  = new Float32Array(DROP_COUNT * 6); // 2 pts per drop
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(positions,3));
+  const idx = new Uint16Array(DROP_COUNT*2);
+  for(let i=0;i<DROP_COUNT;i++){idx[i*2]=i*2;idx[i*2+1]=i*2+1;}
+  geo.setIndex(new THREE.BufferAttribute(idx,1));
+  geo.setDrawRange(0, DROP_COUNT*2);
+
+  const mat = new THREE.LineBasicMaterial({
+    color:0x8ab4cc, transparent:true, opacity:0.45,
+    blending:THREE.AdditiveBlending, depthWrite:false,
+  });
+  const particles = new THREE.LineSegments(geo, mat);
+  particles.userData.dropPositions = [];
+  particles.userData.dropVelocities = [];
+  for(let i=0;i<DROP_COUNT;i++){
+    // Start at cloud base (Y=0) spread randomly across footprint, stagger height
+    particles.userData.dropPositions.push(new THREE.Vector3(
+      (Math.random()-0.5)*1.0,
+      -(Math.random()*1.5),   // start already at various depths below cloud base
+      (Math.random()-0.5)*1.0
+    ));
+    // Fall radially inward (local -Y = toward Earth surface)
+    particles.userData.dropVelocities.push(new THREE.Vector3(
+      (Math.random()-0.5)*0.01,
+      -(0.9+Math.random()*0.5),
+      (Math.random()-0.5)*0.01
+    ));
+  }
+  scene.add(particles);
+  w.rainParticles = particles;
+}
+
+function removeRainForBank(bi){
+  const w = WEATHER[bi];
+  if(!w.rainParticles) return;
+  scene.remove(w.rainParticles);
+  w.rainParticles.geometry.dispose();
+  w.rainParticles.material.dispose();
+  w.rainParticles = null;
+}
+
+// Generate a jagged lightning bolt between two 3D points
+function makeBoltPoints(start, end, offset, depth){
+  if(depth===0) return [start.clone(),end.clone()];
+  const mid = start.clone().lerp(end,0.5+(Math.random()-0.5)*0.3);
+  const perp = new THREE.Vector3(Math.random()-0.5,Math.random()-0.15,Math.random()-0.5).normalize();
+  mid.addScaledVector(perp, offset*(Math.random()*0.8+0.2));
+  return [...makeBoltPoints(start,mid,offset*0.55,depth-1),
+          ...makeBoltPoints(mid,end,offset*0.55,depth-1)];
+}
+
+function spawnLightningForBank(bi, t){
+  const w = WEATHER[bi];
+  const bs = CLOUD_BSPHERES[bi];
+  if(!bs) return;
+
+  // Clear old bolt
+  if(w.lightningGroup){ scene.remove(w.lightningGroup); w.lightningGroup=null; }
+
+  const boltGroup = new THREE.Group();
+  // Start at cloud centre, end 1.5 units toward Earth surface
+  const startPos = bs.currentCenter.clone();
+  const toSurface = startPos.clone().normalize().negate();
+  const endPos = startPos.clone().addScaledVector(toSurface, 1.4 + Math.random()*0.6);
+
+  const pts = makeBoltPoints(startPos, endPos, 0.18, 5);
+  const positions = [];
+  pts.forEach(p=>positions.push(p.x,p.y,p.z));
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions,3));
+
+  // Core white bolt
+  boltGroup.add(new THREE.Line(geo.clone(),
+    new THREE.LineBasicMaterial({color:0xffffff,transparent:true,opacity:0.95,
+      blending:THREE.AdditiveBlending,depthWrite:false})));
+  // Blue glow
+  boltGroup.add(new THREE.Line(geo.clone(),
+    new THREE.LineBasicMaterial({color:0x88aaff,transparent:true,opacity:0.55,
+      blending:THREE.AdditiveBlending,depthWrite:false})));
+
+  // 1–2 random branches
+  const branchCount = 1 + Math.floor(Math.random()*2);
+  for(let b=0;b<branchCount;b++){
+    const bIdx = Math.floor(Math.random()*pts.length*0.6+pts.length*0.15);
+    const bStart = pts[Math.min(bIdx,pts.length-1)].clone();
+    const bEnd = bStart.clone().addScaledVector(toSurface,0.4+Math.random()*0.4)
+      .addScaledVector(new THREE.Vector3(Math.random()-0.5,0,Math.random()-0.5).normalize(),0.25);
+    const bPts = makeBoltPoints(bStart,bEnd,0.08,3);
+    const bPos=[]; bPts.forEach(p=>bPos.push(p.x,p.y,p.z));
+    const bGeo=new THREE.BufferGeometry();
+    bGeo.setAttribute('position',new THREE.Float32BufferAttribute(bPos,3));
+    boltGroup.add(new THREE.Line(bGeo,
+      new THREE.LineBasicMaterial({color:0x8899ff,transparent:true,opacity:0.4,
+        blending:THREE.AdditiveBlending,depthWrite:false})));
+  }
+
+  scene.add(boltGroup);
+  w.lightningGroup = boltGroup;
+  w.lightningFlashT = t;
+
+  // Screen flash only if dragon is currently inside this storm cloud
+  const dragonInThisCloud = insideCloudBanks.includes(bi);
+  if(dragonInThisCloud && _flashEl){
+    _flashEl.style.opacity='0.45';
+    _flashEl.style.transition='opacity 0s';
+    setTimeout(()=>{
+      _flashEl.style.transition='opacity 0.5s';
+      _flashEl.style.opacity='0';
+    },80);
+  }
+}
+
+// Temporarily brighten (t=1→white) or restore (t=0→storm grey) cloud puffs
+function flashCloudPuffs(bi, t){
+  if(!cloudRoot || !cloudRoot.children[bi]) return;
+  cloudRoot.children[bi].children.forEach(child=>{
+    if(!child.material || !child.userData._matCloned) return;
+    const grey = 0.22 + t*(1.0 - 0.22); // lerp from storm grey to white
+    child.material.color.setRGB(grey, grey + t*0.02, grey + t*0.04);
+  });
+}
+
+function updateWeather(dt, t){
+  if(!_weatherInitDone) initWeather();
+  if(!cloudsVisible){ _weatherHudEl.style.display='none'; return; }
+
+  _stormReshuffleTimer += dt;
+  if(_stormReshuffleTimer >= STORM_RESHUFFLE_INTERVAL){
+    _stormReshuffleTimer = 0;
+    reshuffleStorms();
+  }
+
+  let anyStorm = false;
+
+  _stormBanks.forEach(bi=>{
+    const w = WEATHER[bi];
+    const bs = CLOUD_BSPHERES[bi];
+    if(!bs) return;
+    anyStorm = true;
+
+    // ── Rain ──────────────────────────────────────────────────────────────
+    if(!w.rainParticles) makeRainForBank(bi);
+    const rp = w.rainParticles;
+    if(rp){
+      // Anchor at cloud BASE — shift currentCenter radially inward by puff radius
+      // so drops start from the bottom of the cloud, not the middle
+      const cloudBase = bs.currentCenter.clone()
+        .addScaledVector(bs.currentCenter.clone().normalize(), -0.28);
+      rp.position.copy(cloudBase);
+      // Orient so local -Y points toward Earth (radially inward)
+      const up = bs.currentCenter.clone().normalize();
+      rp.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0), up);
+
+      const posArr = rp.geometry.attributes.position.array;
+      const drops  = rp.userData.dropPositions;
+      const vels   = rp.userData.dropVelocities;
+      const DROP_LEN = 0.09;
+
+      for(let i=0;i<drops.length;i++){
+        drops[i].addScaledVector(vels[i], dt);
+        // Reset drop when it falls far enough below cloud base
+        if(drops[i].y < -1.8){
+          drops[i].set(
+            (Math.random()-0.5)*1.0,
+            -Math.random()*0.1,  // respawn just below cloud base (Y=0)
+            (Math.random()-0.5)*1.0
+          );
+        }
+        // Top of streak
+        posArr[i*6+0] = drops[i].x;
+        posArr[i*6+1] = drops[i].y;
+        posArr[i*6+2] = drops[i].z;
+        // Bottom of streak (tail along local -Y = toward Earth)
+        posArr[i*6+3] = drops[i].x + vels[i].x*DROP_LEN;
+        posArr[i*6+4] = drops[i].y + vels[i].y*DROP_LEN;
+        posArr[i*6+5] = drops[i].z + vels[i].z*DROP_LEN;
+      }
+      rp.geometry.attributes.position.needsUpdate = true;
+    }
+
+    // ── Lightning ──────────────────────────────────────────────────────────
+    w.lightningTimer -= dt;
+    if(w.lightningTimer <= 0){
+      // Time for a new bolt
+      w.lightningTimer = 3.5 + Math.random()*6.0;
+      spawnLightningForBank(bi, t);
+    }
+
+    // Flash + bolt visibility — multi-flash effect
+    if(w.lightningFlashT >= 0){
+      const age = t - w.lightningFlashT;
+      if(age < 0.05){
+        // First bright flash — light up the cloud puffs
+        if(w.lightningGroup) w.lightningGroup.visible = true;
+        flashCloudPuffs(bi, 1.0); // bright white
+      } else if(age < 0.10){
+        if(w.lightningGroup) w.lightningGroup.visible = false;
+        flashCloudPuffs(bi, 0.55);
+      } else if(age < 0.14){
+        // Secondary flash
+        if(w.lightningGroup) w.lightningGroup.visible = true;
+        flashCloudPuffs(bi, 0.75);
+      } else if(age < 0.55){
+        // Fade out flicker
+        if(w.lightningGroup){
+          w.lightningGroup.visible = Math.random() > 0.35;
+          w.lightningGroup.children.forEach(c=>{
+            if(c.material) c.material.opacity *= 0.92;
+          });
+        }
+        // Gradually dim puffs back to storm grey
+        const fadeT = (age - 0.14) / 0.41; // 0→1
+        const bright = Math.max(0, 0.75 - fadeT*0.75);
+        flashCloudPuffs(bi, bright);
+      } else {
+        // Done — remove bolt, restore storm grey
+        if(w.lightningGroup){ scene.remove(w.lightningGroup); w.lightningGroup=null; }
+        w.lightningFlashT = -1;
+        flashCloudPuffs(bi, 0); // back to storm grey
+      }
+    }
+  });
+
+  // Clean up rain for banks that are no longer storms
+  for(let bi=0;bi<CLOUD_BANKS.length;bi++){
+    if(!_stormBanks.has(bi) && WEATHER[bi] && WEATHER[bi].rainParticles){
+      removeRainForBank(bi);
+      darkenCloud(bi, false);
+    }
+  }
+
+  // HUD
+  if(_weatherHudEl){
+    if(anyStorm){
+      _weatherHudEl.style.display='block';
+      _weatherHudEl.textContent = '⛈ '+_stormBanks.size+' storm'+ (_stormBanks.size>1?'s':'');
+    } else {
+      _weatherHudEl.style.display='none';
+    }
+  }
 }
 
 function toggleCollisionDebug(){
@@ -301,6 +828,42 @@ function toggleCollisionDebug(){
  if(!debugRoot){debugRoot=new THREE.Group();scene.add(debugRoot);}
  debugRoot.visible=collisionDebug;
  status('Collision Debug: '+(collisionDebug?'ON':'OFF'));
+ if(collisionDebug&&debugRoot){
+   // Clear previous debug meshes
+   while(debugRoot.children.length) debugRoot.remove(debugRoot.children[0]);
+
+   // Dragon collision: body sphere at origin + head sphere offset forward along +Z
+   // The dragon model faces +Z (forward direction). Spine runs ≈2.2 units long.
+   // Body centre sphere (covers wings/torso)
+   const bodyMat=new THREE.MeshBasicMaterial({color:0x00ffff,wireframe:true,transparent:true,opacity:0.7});
+   const bodyS=new THREE.Mesh(new THREE.SphereGeometry(0.28,16,8),bodyMat);
+   bodyS.userData.isDragonBody=true;
+   debugRoot.add(bodyS);
+   // Neck/head sphere — offset forward (+Z in dragon local = forward flight dir)
+   const headMat=new THREE.MeshBasicMaterial({color:0x00ffee,wireframe:true,transparent:true,opacity:0.7});
+   const headS=new THREE.Mesh(new THREE.SphereGeometry(0.18,16,8),headMat);
+   headS.userData.isDragonHead=true;
+   debugRoot.add(headS);
+   // Tail sphere — offset backward
+   const tailMat=new THREE.MeshBasicMaterial({color:0x00eeff,wireframe:true,transparent:true,opacity:0.5});
+   const tailS=new THREE.Mesh(new THREE.SphereGeometry(0.14,16,8),tailMat);
+   tailS.userData.isDragonTail=true;
+   debugRoot.add(tailS);
+   // Phase 2: cloud bounding spheres (yellow wireframe)
+   if(cloudCollisionReady){
+     CLOUD_BSPHERES.forEach(bs=>{
+       const cm=new THREE.Mesh(
+         new THREE.SphereGeometry(bs.radius,14,8),
+         new THREE.MeshBasicMaterial({color:0xffee44,wireframe:true,transparent:true,opacity:0.25})
+       );
+       cm.position.copy(bs.currentCenter);
+       cm.userData.isBSphere=true;
+       cm.userData.bsRef=bs;
+       debugRoot.add(cm);
+     });
+     status('Collision Debug ON — cyan=dragon, yellow=cloud bspheres ('+CLOUD_BSPHERES.length+')');
+   }
+ }
 }
 
 function toggleClouds(){
@@ -322,15 +885,83 @@ function updateClouds(t){
     }
     g.children.forEach((p,i)=>{
       const h=p.userData.home;
-      if(h){
+      if(!h) return;
+      if(p.userData.dead) return; // permanently gone — skip all animation
+
+      if(p.userData.scattered){
+        // ── Scatter animation ─────────────────────────────────────────────
+        // Phase A (TRAVEL_SECS): fly outward + shrink to zero
+        // Phase B (WAIT_SECS):   invisible, snap back to original home position
+        // Phase C (PUFF_SECS):   puff back up slowly at home
+        const TRAVEL_SECS = 1.0;
+        const WAIT_SECS   = 8.0;  // invisible pause before reappearing
+        const PUFF_SECS   = 3.5;
+        const TOTAL       = TRAVEL_SECS + WAIT_SECS + PUFF_SECS;
+
+        const now = clock.elapsedTime;
+        const dtPuff = Math.min(now - (p.userData.lastTick || (now - 0.016)), 0.05);
+        p.userData.lastTick = now;
+
+        p.userData.scatterLife += dtPuff;
+        const life = p.userData.scatterLife;
+        const vel  = p.userData.scatterVel;
+
+        if(life < TRAVEL_SECS){
+          // ── Phase A: fly outward + shrink to zero ────────────────────────
+          p.position.addScaledVector(vel, dtPuff);
+          vel.multiplyScalar(Math.pow(0.60, dtPuff));
+          const shrinkT = life / TRAVEL_SECS;
+          p.scale.copy(p.userData.baseScale).multiplyScalar(Math.max(0, 1.0 - shrinkT));
+
+        } else if(life < TRAVEL_SECS + WAIT_SECS){
+          // ── Phase B: invisible — snap back to original home position ─────
+          vel.set(0,0,0);
+          p.scale.set(0,0,0);
+          // Snap position back to the stored original home (before scattering)
+          const origHome = p.userData.origHome || p.userData.home;
+          p.position.copy(origHome);
+
+        } else if(life < TOTAL){
+          // ── Phase C: puff slowly back up at home position ────────────────
+          const puffT = (life - TRAVEL_SECS - WAIT_SECS) / PUFF_SECS;
+          // Ease-in cubic: starts tiny and slow, grows, slight overshoot, settles
+          let scaleMul;
+          if(puffT < 0.7){
+            const e = puffT / 0.7;
+            scaleMul = e * e * e * 1.15;
+          } else {
+            const e = (puffT - 0.7) / 0.3;
+            scaleMul = 1.15 - e * 0.15;
+          }
+          p.scale.copy(p.userData.baseScale).multiplyScalar(Math.max(0, scaleMul));
+
+        } else {
+          // ── Done — back home, full size, resume idle bob ──────────────────
+          p.userData.scattered   = false;
+          p.userData.scatterLife = 0;
+          p.userData.scatterVel.set(0,0,0);
+          p.userData.lastTick    = undefined;
+          // Restore home to original so idle bob runs correctly
+          if(p.userData.origHome) p.userData.home = p.userData.origHome.clone();
+          p.scale.copy(p.userData.baseScale);
+        }
+
+      } else {
+        // Normal idle bob (Phase 1 behaviour)
         const d=h.clone().normalize();
         p.position.copy(h).addScaledVector(d,Math.sin(t*0.18+gi*1.7+i*.37)*0.018);
+      }
+
+      // Update world position cache for narrow-phase collision (used by updateCloudCollision)
+      if(p.userData.bankIdx !== undefined){
+        p.getWorldPosition(
+          PUFF_BY_BANK[p.userData.bankIdx]?.[p.userData.puffIdx]?.worldPos || new THREE.Vector3()
+        );
       }
     });
   });
 
-  // Cloud shadows: one local tangent decal per cloud bank. These are intentionally
-  // surface meshes, not shader repeats and not per-puff marks.
+  // Cloud shadows: one local tangent decal per cloud bank.
   if(cloudShadowRoot){
     const camDir=camera.position.clone().normalize();
     cloudShadowRoot.children.forEach((sh,i)=>{
@@ -339,8 +970,6 @@ function updateClouds(t){
       tmpQ.setFromAxisAngle(ud.windAxis, ud.windPhase + t*ud.windSpeed);
       const dir=ud.homeDir.clone().applyQuaternion(tmpQ).normalize();
       const pos=dir.clone().multiplyScalar(earthR+0.135);
-
-      // Build a stable tangent basis at the projected surface point.
       let east=new THREE.Vector3(0,1,0).cross(dir);
       if(east.lengthSq()<0.0001) east.set(1,0,0).cross(dir);
       east.normalize();
@@ -348,8 +977,6 @@ function updateClouds(t){
       const basis=new THREE.Matrix4().makeBasis(east,north,dir);
       sh.position.copy(pos);
       sh.quaternion.setFromRotationMatrix(basis);
-
-      // Hide far-side decals before depth precision can make them sparkle at the limb.
       const facing=dir.dot(camDir);
       sh.visible=facing>-0.08 && cloudsVisible;
       const breathe=0.88+0.07*Math.sin(t*0.10+i*0.73);
@@ -357,6 +984,197 @@ function updateClouds(t){
       sh.material.opacity=ud.opacityBase*(0.86+0.10*Math.sin(t*0.11+i*0.73));
     });
   }
+
+  // ── Phase 2: update bounding sphere world positions to match wind drift ──
+  if(cloudCollisionReady){
+    CLOUD_BSPHERES.forEach(bs=>{
+      tmpQ.setFromAxisAngle(bs.windAxis, bs.windPhase + t*bs.windSpeed);
+      bs.currentCenter.copy(bs.centerDir).applyQuaternion(tmpQ)
+        .multiplyScalar(earthR + CLOUD_BANKS[bs.bankIdx].alt);
+    });
+  }
+}
+
+// ── Phase 2: dragon–cloud collision detection & response ─────────────────────
+// Called from animate() every frame after updateFlight so dragonRoot.position is fresh.
+const _cloudFogEl=document.getElementById('cloudFog');
+const _cloudHudEl=document.getElementById('cloudH');
+const _tmpV3=new THREE.Vector3();
+const _tmpV3b=new THREE.Vector3();
+const _tmpV3c=new THREE.Vector3();
+
+function updateCloudCollision(dt){
+  if(!cloudCollisionReady || !cloudsVisible) {
+    // If clouds off, clear any fog immediately
+    inCloudDepth=0; cloudFogTarget=0;
+    _cloudFogEl.style.opacity='0';
+    if(_cloudHudEl) _cloudHudEl.textContent='☁ Clear';
+    return;
+  }
+
+  const dragonPos=dragonRoot.position;
+  // Dragon collision: 3-sphere capsule matching the debug visualization
+  // body=centre, head=forward+0.32, tail=backward-0.28
+  const dragonBody = _tmpV3b.copy(dragonPos).addScaledVector(radial, 0.20);
+  const dragonHead = _tmpV3c.copy(dragonPos).addScaledVector(forward,0.32).addScaledVector(radial,0.24);
+  const dragonTail = _tmpV3.copy(dragonPos).addScaledVector(forward,-0.28).addScaledVector(radial,0.12);
+  const BODY_R=0.28, HEAD_R=0.18, TAIL_R=0.14;
+
+  cloudTurbulenceAccum.set(0,0,0);
+  insideCloudBanks=[];
+  let maxDepth=0;
+
+  CLOUD_BSPHERES.forEach(bs=>{
+    // Test all 3 dragon spheres against this cloud bsphere
+    const distBody=_tmpV3.copy(dragonBody).sub(bs.currentCenter).length();
+    const distHead=_tmpV3.copy(dragonHead).sub(bs.currentCenter).length();
+    const distTail=_tmpV3.copy(dragonTail).sub(bs.currentCenter).length();
+
+    const overlapBody = distBody < bs.radius + BODY_R;
+    const overlapHead = distHead < bs.radius + HEAD_R;
+    const overlapTail = distTail < bs.radius + TAIL_R;
+
+    if(overlapBody || overlapHead || overlapTail){
+      // Depth: use the deepest penetrating sphere
+      let depth=0;
+      if(overlapBody) depth=Math.max(depth, clamp(1-(distBody/(bs.radius+BODY_R)),0,1));
+      if(overlapHead) depth=Math.max(depth, clamp(1-(distHead/(bs.radius+HEAD_R)),0,1));
+      if(overlapTail) depth=Math.max(depth, clamp(1-(distTail/(bs.radius+TAIL_R)),0,1));
+
+      maxDepth=Math.max(maxDepth,depth);
+      insideCloudBanks.push(bs.bankIdx);
+
+      // ── Narrow phase: per-puff scatter ──────────────────────────────────
+      // Storm clouds do NOT scatter — they are too dense/heavy
+      const isStorm = _stormBanks && _stormBanks.has(bs.bankIdx);
+      const puffs = PUFF_BY_BANK[bs.bankIdx];
+      if(!isStorm && puffs && puffs.length){
+        // Refresh world positions for this bank's puffs right now
+        const group = cloudRoot.children[bs.bankIdx];
+        if(group){
+          puffs.forEach(pe=>{
+            if(!pe.mesh || pe.mesh.userData.scattered || pe.mesh.userData.dead) return;
+            pe.mesh.getWorldPosition(pe.worldPos);
+
+            // Test each dragon capsule sphere against this puff
+            const pr = pe.radius;
+            const hitBody = pe.worldPos.distanceTo(dragonBody) < pr + BODY_R;
+            const hitHead = pe.worldPos.distanceTo(dragonHead) < pr + HEAD_R;
+            const hitTail = pe.worldPos.distanceTo(dragonTail) < pr + TAIL_R;
+
+            if(hitBody || hitHead || hitTail){
+              // ── Launch scatter ──────────────────────────────────────────
+              pe.mesh.userData.scattered   = true;
+              pe.mesh.userData.scatterLife = 0;
+              pe.mesh.userData.lastTick    = clock.elapsedTime;
+              // Store original home so Phase B snaps back to it
+              pe.mesh.userData.origHome    = pe.mesh.userData.home.clone();
+
+              // Use the closest dragon capsule sphere as the impact point
+              const impactPoint = hitHead ? dragonHead
+                                : hitBody ? dragonBody
+                                :           dragonTail;
+
+              // True away-from-impact direction in 3D world space
+              const awayFromImpact = pe.worldPos.clone()
+                .sub(impactPoint).normalize();
+
+              // Add dragon's forward momentum so puffs scatter in the direction
+              // the dragon is travelling (hit from front = scatter forward/sideways)
+              const dragonMomentum = forward.clone().multiplyScalar(speed * 80);
+
+              // Small random perpendicular spread so each puff goes a different way
+              const randPerp = new THREE.Vector3(
+                Math.random()-0.5, Math.random()-0.5, Math.random()-0.5
+              );
+              // Remove radial component from randPerp so spread stays tangential
+              randPerp.addScaledVector(radial, -randPerp.dot(radial)).normalize();
+
+              const scatterDir = awayFromImpact
+                .addScaledVector(dragonMomentum, 0.5)   // inherit dragon direction
+                .addScaledVector(randPerp, 0.4)          // tangential random spread
+                .normalize();
+
+              // Launch speed scales with dragon speed — faster dragon = harder hit = bigger scatter
+              // dragon speed is ~0.004–0.115, scale it up to a useful range
+              const launchSpeed = 0.25 + speed * 8.0 + Math.random()*0.2;
+              pe.mesh.userData.scatterVel.copy(scatterDir).multiplyScalar(launchSpeed);
+
+              // Randomise reform time so they don't all snap back at once
+              pe.mesh.userData.scatterMax = 2.5 + Math.random()*2.5;
+            }
+          });
+        }
+      }
+
+      // ── Turbulence: random nudge perpendicular to radial ─────────────────
+      // Only apply when meaningfully inside (depth > 0.15) to avoid jitter at edges.
+      if(depth>0.15){
+        // Use a deterministic noise pattern based on time + bank index so each
+        // cloud has its own turbulence character. No random() so it's frame-stable.
+        const bi=bs.bankIdx;
+        const tx=Math.sin(clock.elapsedTime*1.8+bi*3.7)*Math.cos(clock.elapsedTime*1.1+bi*2.3);
+        const tz=Math.cos(clock.elapsedTime*2.2+bi*1.9)*Math.sin(clock.elapsedTime*0.9+bi*4.1);
+        // Project onto tangent plane (perpendicular to radial) so we don't push
+        // dragon into or out of the Earth.
+        _tmpV3.set(tx,0,tz);
+        const radialComp=_tmpV3.dot(radial);
+        _tmpV3.addScaledVector(radial,-radialComp); // remove radial component
+        const turbStrength=depth*depth*0.0008; // subtle — max ~0.0008 units/frame
+        cloudTurbulenceAccum.addScaledVector(_tmpV3,turbStrength);
+      }
+    }
+  });
+
+  // ── Smooth fog depth ──────────────────────────────────────────────────────
+  const fogSpeed=maxDepth>inCloudDepth ? 3.5 : 2.0; // enter fast, exit a bit slower
+  inCloudDepth+=(maxDepth-inCloudDepth)*(1-Math.exp(-dt*fogSpeed));
+  inCloudDepth=clamp(inCloudDepth,0,1);
+
+  // ── Apply turbulence to dragon position ───────────────────────────────────
+  if(cloudTurbulenceAccum.lengthSq()>0){
+    dragonRoot.position.add(cloudTurbulenceAccum);
+    // Keep dragon on its sphere shell (re-project onto correct altitude)
+    dragonRoot.position.normalize().multiplyScalar(earthR+altitude);
+    // Also update the radial direction so flight system stays consistent
+    radial.copy(dragonRoot.position).normalize();
+    projectForward();
+  }
+
+  // ── CSS fog overlay ───────────────────────────────────────────────────────
+  // The overlay fades in smoothly. We drive opacity directly (no CSS transition)
+  // for frame-accurate response.
+  const fogOpacity=inCloudDepth*inCloudDepth*0.82; // quadratic: barely visible at edge, thick at centre
+  _cloudFogEl.style.opacity=fogOpacity.toFixed(3);
+
+  // Slight blue-grey tint deepens as we go deeper
+  const r=Math.round(200+inCloudDepth*40);
+  const g=Math.round(210+inCloudDepth*35);
+  const b=Math.round(230+inCloudDepth*20);
+  _cloudFogEl.style.background=
+    `radial-gradient(ellipse at 50% 40%,rgba(${r},${g},${b},0.45) 0%,rgba(${r-20},${g-20},${b-10},0.88) 100%)`;
+
+  // ── HUD update ─────────────────────────────────────────────────────────────
+  if(_cloudHudEl){
+    if(inCloudDepth>0.55){
+      _cloudHudEl.textContent='☁ INSIDE CLOUD';
+      _cloudHudEl.style.color='#aac8ff';
+    } else if(inCloudDepth>0.15){
+      _cloudHudEl.textContent='☁ Entering cloud…';
+      _cloudHudEl.style.color='#ccdff5';
+    } else {
+      _cloudHudEl.textContent='☁ Clear';
+      _cloudHudEl.style.color='';
+    }
+  }
+
+  // ── Scene fog thickens when inside cloud ──────────────────────────────────
+  // Base fog density is 0.0017. We ramp it up to 0.012 at full cloud depth.
+  if(scene.fog) scene.fog.density=0.0017+inCloudDepth*0.011;
+
+  // ── Bloom / exposure effect ───────────────────────────────────────────────
+  // Slightly overbrighten the scene when inside a cloud (realistic bright-white interior).
+  renderer.toneMappingExposure=clamp(1.08+inCloudDepth*0.55, 1.08, 1.65);
 }
 function makeEarth(){
   const base=tex(ASSET.base,{srgb:true,aniso:12});
@@ -1456,7 +2274,7 @@ function updateShadow(t){
   shadowLight.shadow.camera.updateMatrixWorld(true);
   shadowLight.shadow.needsUpdate=true;
 }
-function resetFlight(){radial.set(.20,.55,.81).normalize();forward.set(0,0,1);projectForward();altitude=.76;speed=targetSpeed=.032;camYaw=0;camPitch=.14;camDist=3.20;}
+function resetFlight(){radial.set(.20,.55,.81).normalize();forward.set(0,0,1);projectForward();altitude=.76;speed=targetSpeed=.032;camYaw=0;camPitch=Math.PI/2;camDist=3.80;camMode='top';}
 function projectForward(){forward.addScaledVector(radial,-forward.dot(radial)).normalize();right.crossVectors(forward,radial).normalize();}
 function updateFlight(dt){
   // Up now works like thrust/forward flight: hold ↑ to actively move forward and speed up.
@@ -1475,24 +2293,120 @@ function updateFlight(dt){
   if(flyAction) flyAction.timeScale=flyAnimSpeed;
 }
 function updateCamera(dt){
-  const behind=forward.clone().negate().applyAxisAngle(radial,camYaw).normalize(); const up=radial.clone();
   const target=dragonRoot.position.clone().add(radial.clone().multiplyScalar(.20));
-  const desired=target.clone().add(behind.multiplyScalar(Math.cos(camPitch)*camDist)).add(up.multiplyScalar(Math.sin(camPitch)*camDist));
-  camera.position.lerp(desired,1-Math.exp(-dt*6.0)); camera.lookAt(target.clone().add(forward.clone().multiplyScalar(.85)));
+  let desired;
+
+  if(camMode==='top'){
+    // Top-down: camera sits directly above dragon along radial axis.
+    // Use dragon's forward vector to keep the view consistently oriented —
+    // when dragon turns 180° the camera rotates with it so forward stays "up" on screen.
+    const up = radial.clone();                          // away from Earth
+    const camPos = dragonRoot.position.clone()
+      .addScaledVector(up, camDist)                     // lift above dragon
+      .addScaledVector(forward, 0.2);                   // slight forward offset
+    camera.position.lerp(camPos, 1-Math.exp(-dt*5.0));
+
+    // LookAt: aim at dragon, use dragon's forward as the camera's world-up
+    // so the view always has forward pointing "up" on screen regardless of heading
+    const lookTarget = dragonRoot.position.clone()
+      .addScaledVector(forward, 0.5);
+    camera.up.copy(forward);                            // lock screen-up to flight direction
+    camera.lookAt(lookTarget);
+  } else {
+    // Classic follow-cam: behind and slightly above
+    const behind=forward.clone().negate().applyAxisAngle(radial,camYaw).normalize();
+    const up=radial.clone();
+    desired=target.clone()
+      .add(behind.multiplyScalar(Math.cos(camPitch)*camDist))
+      .add(up.multiplyScalar(Math.sin(camPitch)*camDist));
+    camera.position.lerp(desired,1-Math.exp(-dt*6.0));
+    camera.lookAt(target.clone().add(forward.clone().multiplyScalar(.85)));
+  }
 }
 function addEvents(){
   addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight);});
-  addEventListener('keydown',e=>{if(e.code==='ArrowUp')keys.up=true;if(e.code==='ArrowDown')keys.down=true;if(e.code==='ArrowLeft')keys.left=true;if(e.code==='ArrowRight')keys.right=true;if(e.code==='KeyW')keys.w=true;if(e.code==='KeyS')keys.s=true;if(e.code==='KeyR')resetFlight();if(e.code==='KeyB')toggleDolphinSpawnBorders();if(e.code==='KeyC')toggleCollisionDebug();if(e.code==='Space'){keys.space=true;e.preventDefault();}});
-  addEventListener('keyup',e=>{if(e.code==='ArrowUp')keys.up=false;if(e.code==='ArrowDown')keys.down=false;if(e.code==='ArrowLeft')keys.left=false;if(e.code==='ArrowRight')keys.right=false;if(e.code==='KeyW')keys.w=false;if(e.code==='KeyS')keys.s=false;if(e.code==='Space'){keys.space=false;e.preventDefault();}});
-  canvas.addEventListener('mousedown',e=>{dragging=true;mx=e.clientX;my=e.clientY});addEventListener('mouseup',()=>dragging=false);addEventListener('mousemove',e=>{if(!dragging)return;const dx=e.clientX-mx,dy=e.clientY-my;mx=e.clientX;my=e.clientY;camYaw-=dx*.006;camPitch=clamp(camPitch+dy*.004,-.35,.85);});
-  canvas.addEventListener('wheel',e=>{e.preventDefault();camDist=clamp(camDist+e.deltaY*.0035,1.45,8.5);},{passive:false});
+  addEventListener('keydown',e=>{
+    if(e.code==='ArrowUp')   keys.up=true;
+    if(e.code==='ArrowDown') keys.down=true;
+    if(e.code==='ArrowLeft') keys.left=true;
+    if(e.code==='ArrowRight')keys.right=true;
+    if(e.code==='KeyW')      keys.w=true;
+    if(e.code==='KeyS')      keys.s=true;
+    if(e.code==='KeyR')      resetFlight();
+    if(e.code==='KeyB')      toggleDolphinSpawnBorders();
+    if(e.code==='KeyC')      toggleClouds();
+    if(e.code==='KeyV')      toggleCollisionDebug();
+    if(e.code==='KeyT'){
+      // Toggle between top-down and follow cam
+      if(camMode==='top'){
+        camMode='follow'; camPitch=0.14; camDist=3.20;
+        camera.up.set(0,1,0); // restore default world up for follow cam
+        status('Camera: Follow (T to switch)');
+      } else {
+        camMode='top'; camPitch=Math.PI/2; camDist=3.80;
+        status('Camera: Top-down (T to switch)');
+      }
+    }
+    if(e.code==='Space'){keys.space=true;e.preventDefault();}
+  });
+  addEventListener('keyup',e=>{
+    if(e.code==='ArrowUp')   keys.up=false;
+    if(e.code==='ArrowDown') keys.down=false;
+    if(e.code==='ArrowLeft') keys.left=false;
+    if(e.code==='ArrowRight')keys.right=false;
+    if(e.code==='KeyW')      keys.w=false;
+    if(e.code==='KeyS')      keys.s=false;
+    if(e.code==='Space'){keys.space=false;e.preventDefault();}
+  });
+  // Mouse drag: in top-down mode rotates the overhead view (camYaw only)
+  // In follow mode: yaw + pitch orbit
+  canvas.addEventListener('mousedown',e=>{dragging=true;mx=e.clientX;my=e.clientY;});
+  addEventListener('mouseup',()=>dragging=false);
+  addEventListener('mousemove',e=>{
+    if(!dragging) return;
+    const dx=e.clientX-mx, dy=e.clientY-my;
+    mx=e.clientX; my=e.clientY;
+    camYaw -= dx*0.006;
+    if(camMode==='follow') camPitch=clamp(camPitch+dy*0.004,-.35,.85);
+    // In top-down mode, vertical drag adjusts height (camDist)
+    if(camMode==='top') camDist=clamp(camDist+dy*0.012,1.45,12.0);
+  });
+  // Wheel: zoom in/out in both modes
+  canvas.addEventListener('wheel',e=>{
+    e.preventDefault();
+    camDist=clamp(camDist+e.deltaY*0.004, 1.45, 12.0);
+  },{passive:false});
 }
 function animate(){
   requestAnimationFrame(animate); const dt=Math.min(clock.getDelta(),.04), t=clock.elapsedTime;
   if(earthMat){earthMat.uniforms.time.value=t;earthMat.uniforms.detailBoost.value=clamp(1.15-(altitude-.30)/1.45,0.0,1.15);} scene.traverse(o=>{if(o.userData&&o.userData.isWaterShell)o.material.uniforms.time.value=t});
   if(mixer)mixer.update(dt); updateFlight(dt);
   if(earthMat){earthMat.uniforms.dragonGroundDir.value.copy(radial); earthMat.uniforms.dragonShimmerStrength.value=clamp(0.70-altitude*.18,0.22,0.62); earthMat.uniforms.dragonShadowStrength.value=clamp(0.86-altitude*.22,0.28,0.74);}
-  updateShadow(t); updateFireBreath(t); updateDolphins(dt,t); updateClouds(t); updateCamera(dt);
+  updateShadow(t); updateFireBreath(t); updateDolphins(dt,t); updateClouds(t); updateCloudCollision(dt); updateCloudRegrowth(dt); updateWeather(dt,t); updateCamera(dt);
+  // Phase 2: keep debug bsphere meshes in sync with drifting clouds
+  if(collisionDebug&&debugRoot){
+    debugRoot.children.forEach(m=>{
+      if(m.userData.isBSphere&&m.userData.bsRef){
+        m.position.copy(m.userData.bsRef.currentCenter);
+      } else if(dragonRoot){
+        if(m.userData.isDragonBody){
+          // Body — lifted up along radial to sit on the torso
+          m.position.copy(dragonRoot.position)
+            .addScaledVector(radial, 0.20);
+        } else if(m.userData.isDragonHead){
+          // Head — forward and well above root pivot
+          m.position.copy(dragonRoot.position)
+            .addScaledVector(forward, 0.32)
+            .addScaledVector(radial, 0.24);
+        } else if(m.userData.isDragonTail){
+          // Tail — backward and slightly raised
+          m.position.copy(dragonRoot.position)
+            .addScaledVector(forward, -0.28)
+            .addScaledVector(radial, 0.12);
+        }
+      }
+    });
+  }
   document.getElementById('speedH').textContent='Speed '+(speed*1000).toFixed(0); document.getElementById('altH').textContent='Altitude '+altitude.toFixed(2);
   renderer.render(scene,camera);
 }
