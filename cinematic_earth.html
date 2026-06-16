@@ -1,0 +1,1504 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>SebLague Style Dragon Earth v2</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#02040a;font-family:Arial,Helvetica,sans-serif;color:#dcefff;}
+  #c{display:block;width:100vw;height:100vh;}
+  #start{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:12px;background:radial-gradient(circle at 50% 38%,#10213d 0%,#02040a 62%,#000 100%);z-index:9;text-align:center}
+  #start h1{margin:0;font-size:42px;letter-spacing:2px;color:#ffd179;text-shadow:0 0 28px #f07c00,0 0 60px #123e8e}
+  #start p{margin:0 0 10px;color:#a9cce8;max-width:820px;line-height:1.45}
+  button{border:0;border-radius:999px;padding:13px 32px;background:linear-gradient(135deg,#c87512,#ff9b22);color:#fff;font-size:16px;font-weight:800;letter-spacing:1px;box-shadow:0 0 26px #ff9b2244;cursor:pointer}
+  #hud{position:fixed;display:none;left:14px;right:14px;top:12px;z-index:4;justify-content:space-between;pointer-events:none}
+  .pill{background:rgba(0,0,0,.55);border:1px solid rgba(255,200,112,.32);border-radius:8px;padding:8px 12px;color:#ffcf77;font:12px/1.25 monospace;backdrop-filter:blur(4px)}
+  #hint{position:fixed;display:none;bottom:14px;left:50%;transform:translateX(-50%);z-index:4;white-space:nowrap;color:#b9d7e7;background:rgba(0,0,0,.55);border:1px solid rgba(255,200,112,.25);border-radius:8px;padding:8px 14px;font-size:12px}
+  #status{position:fixed;display:none;left:12px;bottom:12px;max-width:75vw;z-index:5;background:rgba(0,0,0,.62);color:#9df49d;border-radius:6px;padding:6px 9px;font:12px monospace}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="start">
+  <h1>🐉 SEBLAGUE STYLE EARTH v2</h1>
+  <p>Clean rebuilt renderer: separate land/ocean/color/topography/coast/foam layers, flat oceans with bathymetry color, smoothed continents, visible softened elevations, and true Three.js mesh shadow: animated wing flaps cast onto a tangent receiver.</p>
+  <button id="go">TAKE FLIGHT</button>
+</div>
+<div id="hud"><div class="pill" id="speedH">Speed</div><div class="pill" id="altH">Altitude</div><div class="pill" id="locH">SebLague-style Earth</div></div>
+<div id="hint">↑ thrust forward · ↓ slow down · ←/→ steer · W/S altitude · SPACE fire · B dolphin borders · C clouds · Mouse drag camera · Wheel zoom · R reset</div>
+<div id="status"></div>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/utils/SkeletonUtils.js"></script>
+<script>
+const ASSET = {
+  base:'./assets/base.jpg',
+  // NASA Blue Marble tiled base color. Layout is 4 columns x 2 rows:
+  // top row A1/B1/C1/D1, bottom row A2/B2/C2/D2.
+  // NASA BMNG tile atlas, stitched from A1/A2/B1/B2/C1/C2/D1/D2.
+  // Using one atlas avoids WebGL's 16 texture-unit limit on many browsers/GPUs.
+  nasaAtlas:'./assets/nasa_tiles/world_atlas_8k.jpg',
+  topo:'./assets/topo.jpg',
+  heightNormal:'./assets/height_normal_seb.png',
+  bathy:'./assets/bathy.jpg',
+  land:'./assets/landmask_smooth.png',
+  coast:'./assets/coastline_smooth.png',
+  shore:'./assets/shore_dst_smooth.png',
+  lakes:'./assets/Lakes.png',
+  waveA:'./assets/wave_a.png',
+  waveB:'./assets/wave_b.png',
+  waterNormal:'./assets/water_normal.png',
+  oceanColor:'./assets/ocean_color.png',
+  chloro:'./assets/chloro.png',
+  shallow:'./assets/shallow_blur.png',
+  dragon:'./assets/dragon.glb',
+  fireSide:'./assets/TorchFire-side.png',
+  fireIso:'./assets/TorchFire-isometric.png',
+  fireTop:'./assets/TorchFire-top.png',
+  dolphin:'./assets/dolphin.glb',
+  foamSplash:'./assets/foam_splash.png',
+  rippleHeight:'./assets/ripple_height.png',
+  rippleNormal:'./assets/ripple_normal.png',
+  splashDroplets:'./assets/splash_droplets.png',
+  wakeTrail:'./assets/wake_trail.png',
+  dolphinSpawnMask:'./assets/dolphin_spawn_mask.png'
+};
+const canvas=document.getElementById('c'), statusEl=document.getElementById('status');
+let scene,camera,renderer,clock,earth,earthMat,dragonRoot,dragonVisual,mixer,flyAction,shadowGroup,shadowWingL,shadowWingR,shadowBody,shadowTail,shadowPlane,shadowLight,shadowTarget;
+let fireBreath=null, fireMats=[], fireTopPlane=null, fireGlow=null, mouthBone=null, fireActive=false;
+let dolphinTemplate=null, dolphinJumpClip=null, dolphinSwimClip=null, dolphinSpawnCanvas=null, dolphinSpawnCtx=null, dolphinSpawnTimer=2.2;
+let dolphinAllowedDirections=[];
+let dolphinFoamTexture=null, dolphinRippleTexture=null, dolphinDropletTexture=null, dolphinWakeTexture=null;
+let dolphinSpawnBorderMesh=null, dolphinSpawnBorderVisible=false;
+let cloudRoot=null, cloudShadowRoot=null, cloudsVisible=true;
+let dolphinNextPodId=1;
+const dolphins=[];
+const _fireWorldPos=new THREE.Vector3(), _fireWorldQuat=new THREE.Quaternion(), _fireLocalOffset=new THREE.Vector3(), _fireLocalRotQuat=new THREE.Quaternion();
+// Dragon mouth-fire anchor. The rig has a dedicated bone named fireBreath.28.
+// Fine tune the flame origin here after attaching to that bone.
+// In this bone's local space: X/Y/Z are small offsets around the mouth.
+// Start with 0s; use increments like 0.01 or 0.02 for tiny adjustments.
+const FIRE_BONE_NAME='fireBreath.28';
+const FIRE_BONE_LOCAL_OFFSET=new THREE.Vector3(0.00,0.00,-0.06);
+const FIRE_BONE_LOCAL_ROTATION=new THREE.Euler(Math.PI/2,0,0);
+_fireLocalRotQuat.setFromEuler(FIRE_BONE_LOCAL_ROTATION);
+const FIRE_BONE_SCALE=0.32;
+const DOLPHIN_MAX_ACTIVE=15;
+const DOLPHIN_MAX_ACTIVE_PODS=3;
+const DOLPHIN_POD_MIN=3;
+const DOLPHIN_POD_MAX=5;
+const DOLPHIN_SCALE=0.09;
+const DOLPHIN_SURFACE_OFFSET=0.018;
+const DOLPHIN_SUBMERGE_DEPTH=0.030;
+const DOLPHIN_SURFACE_SKIM_LIFT=0.070;
+const DOLPHIN_SURFACE_TRAVEL=0.0032;
+const DOLPHIN_EXTRA_ARC_LIFT=0.060;
+const DOLPHIN_WAKE_DURATION=1.05;
+const DOLPHIN_JUMP_DURATION=1.28;
+const DOLPHIN_MIN_SPAWN_DELAY=1.0;
+const DOLPHIN_MAX_SPAWN_DELAY=2.4;
+// Dolphin spawning now uses ONLY the hand-painted dolphin_spawn_mask.png.
+// Previous shoreline/zone/visual-colour inference paths are intentionally disabled.
+// Press B to toggle a red border overlay showing the exact allowed dolphin habitat areas.
+const DOLPHIN_SPAWN_RADIUS=0.28; // no longer used for spawning; mask samples are the sole source
+const DOLPHIN_MASK_THRESHOLD=0.45;
+// Keep dolphins safely inside the painted white zones instead of right on the edge.
+const DOLPHIN_MASK_INSET=0.035; // hard spawn-only inset so pods stay well inside territory boundaries
+const DOLPHIN_MASK_EDGE_DEBUG=0.006;
+// Phase 1.2 clouds: many small, rounded cumulus clusters around the whole globe.
+// Press C to toggle.  Generated deterministically so the world looks the same on reload.
+const CLOUD_BANKS=[];
+function buildGlobalRoundCloudBanks(){
+  if(CLOUD_BANKS.length) return;
+  function rnd(seed){let x=Math.sin(seed*12.9898)*43758.5453; return x-Math.floor(x);}
+  const total=74;
+  for(let i=0;i<total;i++){
+    const u=rnd(1000+i*17), v=rnd(2000+i*23);
+    const lon=-180+360*u;
+    // Uniform on a sphere, but avoid the extreme poles so clouds don't bunch at the texture seam.
+    const lat=THREE.MathUtils.radToDeg(Math.asin(-0.82+1.64*v));
+    const sizeRoll=rnd(3000+i*29);
+    const r=sizeRoll<0.68 ? 0.30+rnd(4000+i*31)*0.12 : sizeRoll<0.93 ? 0.42+rnd(5000+i*37)*0.14 : 0.58+rnd(6000+i*41)*0.12;
+    const roundness=0.88+rnd(7000+i*43)*0.18;
+    CLOUD_BANKS.push({
+      name:'global rounded cloud '+i,
+      lat, lon,
+      rx:r,
+      ry:r*roundness,
+      count:8+Math.floor(rnd(8000+i*47)*12),
+      alt:1.34+rnd(9000+i*53)*0.28
+    });
+  }
+}
+const earthR=10;
+let radial=new THREE.Vector3(0.20,0.55,0.81).normalize();
+let forward=new THREE.Vector3(0,0,1), right=new THREE.Vector3();
+let altitude=0.76,minAlt=0.30,maxAlt=5.4,speed=0.032,targetSpeed=0.032,maxSpeed=0.115,flyAnimSpeed=1.0;
+let camYaw=0,camPitch=0.14,camDist=3.20,dragging=false,mx=0,my=0,keys={};
+let collisionDebug=false, debugRoot=null;
+function status(s){statusEl.style.display='block';statusEl.textContent=s;console.log(s)}
+function clamp(x,a,b){return Math.max(a,Math.min(b,x))}
+function tex(url,opts={}){const t=new THREE.TextureLoader().load(url,()=>{},undefined,()=>status('Texture load failed: '+url));t.anisotropy=opts.aniso||8;if(opts.srgb)t.encoding=THREE.sRGBEncoding;if(opts.repeat)t.wrapS=t.wrapT=THREE.RepeatWrapping;return t;}
+function init(){
+  scene=new THREE.Scene(); scene.fog=new THREE.FogExp2(0x02040a,0.0017);
+  camera=new THREE.PerspectiveCamera(58,innerWidth/innerHeight,0.03,1000);
+  renderer=new THREE.WebGLRenderer({canvas,antialias:true,powerPreference:'high-performance'});
+  renderer.setSize(innerWidth,innerHeight); renderer.setPixelRatio(Math.min(devicePixelRatio,1.75));
+  renderer.outputEncoding=THREE.sRGBEncoding; renderer.toneMapping=THREE.ACESFilmicToneMapping; renderer.toneMappingExposure=1.08;
+  renderer.shadowMap.enabled=true; renderer.shadowMap.type=THREE.PCFSoftShadowMap;
+  clock=new THREE.Clock();
+  scene.add(new THREE.HemisphereLight(0xcfe8ff,0x101820,1.45));
+  const sun=new THREE.DirectionalLight(0xffffff,2.2); sun.position.set(-18,14,12); scene.add(sun);
+  const fill=new THREE.DirectionalLight(0x92c9ff,0.45); fill.position.set(14,6,-12); scene.add(fill);
+  makeStars(); makeEarth(); makeClouds(); makeDragonFallback(); makeFireBreath(); makeShadow(); loadDragon(); loadDolphins(); resetFlight(); addEvents(); animate();
+}
+function makeStars(){
+  const g=new THREE.BufferGeometry(), n=1600, arr=new Float32Array(n*3);
+  for(let i=0;i<n;i++){let v=new THREE.Vector3(Math.random()*2-1,Math.random()*2-1,Math.random()*2-1).normalize().multiplyScalar(150+Math.random()*430); arr[i*3]=v.x;arr[i*3+1]=v.y;arr[i*3+2]=v.z;}
+  g.setAttribute('position',new THREE.BufferAttribute(arr,3));
+  scene.add(new THREE.Points(g,new THREE.PointsMaterial({color:0xffffff,size:.54,transparent:true,opacity:.75,sizeAttenuation:true})));
+}
+
+function latLonToDir(lat,lon){
+  const la=THREE.MathUtils.degToRad(lat), lo=THREE.MathUtils.degToRad(lon);
+  return new THREE.Vector3(Math.cos(la)*Math.sin(lo), Math.sin(la), Math.cos(la)*Math.cos(lo)).normalize();
+}
+function makeClouds(){
+  buildGlobalRoundCloudBanks();
+  if(cloudRoot) scene.remove(cloudRoot);
+  if(cloudShadowRoot) scene.remove(cloudShadowRoot);
+  cloudRoot=new THREE.Group(); cloudRoot.name='Phase1_SebStyle_Puff_Clouds'; scene.add(cloudRoot);
+  cloudShadowRoot=new THREE.Group(); cloudShadowRoot.name='Phase1_Cloud_Shadows'; scene.add(cloudShadowRoot);
+
+  // Phase 1.2: compact opaque white cumulus puffs.  The puffs are real lit spheres,
+  // while very soft low-opacity mist sprites inside each bank blur the visible
+  // intersections so the cluster reads as one fluffy cloud instead of separate balls.
+  const puffGeo=new THREE.SphereBufferGeometry(1,20,14);
+  const mats=[
+    new THREE.MeshLambertMaterial({color:0xffffff,transparent:false,depthWrite:true}),
+    new THREE.MeshLambertMaterial({color:0xf4f6f8,transparent:false,depthWrite:true}),
+    new THREE.MeshLambertMaterial({color:0xe8edf2,transparent:false,depthWrite:true})
+  ];
+  const mistCanvas=document.createElement('canvas');
+  mistCanvas.width=mistCanvas.height=128;
+  const ctx=mistCanvas.getContext('2d');
+  const grad=ctx.createRadialGradient(64,64,8,64,64,64);
+  grad.addColorStop(0.00,'rgba(255,255,255,0.42)');
+  grad.addColorStop(0.42,'rgba(255,255,255,0.24)');
+  grad.addColorStop(0.72,'rgba(255,255,255,0.09)');
+  grad.addColorStop(1.00,'rgba(255,255,255,0.0)');
+  ctx.fillStyle=grad; ctx.fillRect(0,0,128,128);
+  const mistTex=new THREE.CanvasTexture(mistCanvas);
+  const mistMat=new THREE.SpriteMaterial({map:mistTex,color:0xffffff,transparent:true,opacity:0.58,depthWrite:false,depthTest:true});
+
+  // Cloud-bank shadow: one soft local tangent decal per cloud BANK, not per puff.
+  // It follows the same principle as the dragon shadow receiver: a small transparent
+  // surface-hugging mesh aligned to the local Earth tangent. This avoids the previous
+  // shader/global-dot approach and prevents repeated shadows across the planet.
+  const shadowCanvas=document.createElement('canvas');
+  shadowCanvas.width=shadowCanvas.height=256;
+  const sctx=shadowCanvas.getContext('2d');
+  const sgrad=sctx.createRadialGradient(128,128,6,128,128,128);
+  sgrad.addColorStop(0.00,'rgba(0,0,0,0.18)');
+  sgrad.addColorStop(0.38,'rgba(0,0,0,0.105)');
+  sgrad.addColorStop(0.72,'rgba(0,0,0,0.030)');
+  sgrad.addColorStop(1.00,'rgba(0,0,0,0.0)');
+  sctx.fillStyle=sgrad; sctx.fillRect(0,0,256,256);
+  const shadowTex=new THREE.CanvasTexture(shadowCanvas);
+  shadowTex.needsUpdate=true;
+  const shadowMatBase=new THREE.MeshBasicMaterial({
+    map:shadowTex, color:0x000000, transparent:true, opacity:0.42,
+    depthWrite:false, depthTest:true, side:THREE.DoubleSide
+  });
+  const shadowGeo=new THREE.CircleBufferGeometry(1,80);
+
+  function rnd(seed){let x=Math.sin(seed*12.9898)*43758.5453; return x-Math.floor(x);}
+  CLOUD_BANKS.forEach((bank,bi)=>{
+    const center=latLonToDir(bank.lat,bank.lon);
+    const east=new THREE.Vector3(Math.cos(THREE.MathUtils.degToRad(bank.lon)),0,-Math.sin(THREE.MathUtils.degToRad(bank.lon))).normalize();
+    const north=new THREE.Vector3().crossVectors(east,center).normalize();
+    const group=new THREE.Group(); group.name='cloud_'+bank.name; cloudRoot.add(group);
+    // Each cluster drifts slowly in a slightly different wind current around the globe.
+    // Axis is close to planet north/south but tilted so clouds do not all move in perfect latitude bands.
+    group.userData.windAxis=new THREE.Vector3(
+      (rnd((bi+1)*111)-0.5)*0.26,
+      1.0,
+      (rnd((bi+1)*127)-0.5)*0.26
+    ).normalize();
+    group.userData.windSpeed=(0.00030+rnd((bi+1)*139)*0.00042) * (rnd((bi+1)*149)>0.5?1:-1);
+    group.userData.windPhase=rnd((bi+1)*157)*Math.PI*2;
+
+    // One combined footprint for the whole cloud bank. The anchor is the bank center,
+    // not individual puffs, so shadows stay below the visible cloud mass without dotting.
+    const shadow=new THREE.Mesh(shadowGeo,shadowMatBase.clone());
+    const shadowDir=center.clone();
+    const shadowSurface=shadowDir.clone().multiplyScalar(earthR+0.135);
+    const shadowEast=east.clone();
+    const shadowNorth=north.clone();
+    const shadowBasis=new THREE.Matrix4().makeBasis(shadowEast,shadowNorth,shadowDir);
+    shadow.position.copy(shadowSurface);
+    shadow.quaternion.setFromRotationMatrix(shadowBasis);
+    const shadowScale=Math.max(bank.rx,bank.ry)*(1.30+rnd((bi+1)*811)*0.18);
+    shadow.scale.set(shadowScale,shadowScale*(0.72+rnd((bi+1)*823)*0.16),1);
+    shadow.renderOrder=82;
+    shadow.userData.homeDir=shadowDir.clone();
+    shadow.userData.baseScale=shadow.scale.clone();
+    shadow.userData.isCloudShadow=true;
+    shadow.userData.windAxis=group.userData.windAxis.clone();
+    shadow.userData.windSpeed=group.userData.windSpeed;
+    shadow.userData.windPhase=group.userData.windPhase;
+    shadow.userData.opacityBase=0.24 + rnd((bi+1)*829)*0.06;
+    cloudShadowRoot.add(shadow);
+
+    // Soft interior haze: this is what blurs the seams where puff spheres intersect.
+    const mistCount=Math.max(2,Math.floor(bank.count/7));
+    for(let j=0;j<mistCount;j++){
+      const a=rnd((bi+1)*991+j*37)*Math.PI*2;
+      const rr=Math.sqrt(rnd((bi+1)*887+j*29))*0.68;
+      const x=Math.cos(a)*bank.rx*rr;
+      const y=Math.sin(a)*bank.ry*rr;
+      const d=center.clone().addScaledVector(east,x/earthR).addScaledVector(north,y/earthR).normalize();
+      const pos=d.multiplyScalar(earthR+bank.alt+(rnd((bi+1)*761+j*13)-0.5)*0.07);
+      const mist=new THREE.Sprite(mistMat.clone());
+      mist.position.copy(pos);
+      const s=(0.60+rnd((bi+1)*541+j*17)*0.30)*Math.max(bank.rx,bank.ry)*1.35;
+      mist.scale.set(s,s*(0.88+rnd((bi+1)*557+j*19)*0.16),1);
+      mist.userData.home=pos.clone();
+      group.add(mist);
+    }
+
+    for(let i=0;i<bank.count;i++){
+      const a=rnd((bi+1)*101+i*7)*Math.PI*2;
+      const rr=Math.sqrt(rnd((bi+1)*201+i*11));
+      const x=Math.cos(a)*bank.rx*rr;
+      const y=Math.sin(a)*bank.ry*rr;
+      const d=center.clone().addScaledVector(east,x/earthR).addScaledVector(north,y/earthR).normalize();
+      const alt=bank.alt+(rnd((bi+1)*301+i*13)-0.5)*0.14;
+      const pos=d.multiplyScalar(earthR+alt);
+      const m=mats[i%3];
+      const puff=new THREE.Mesh(puffGeo,m);
+      puff.position.copy(pos);
+
+      // Smaller, rounder puffs with mild variation so clusters stay compact and cumulus-like.
+      const base=0.095+rnd((bi+1)*401+i*17)*0.175;
+      puff.scale.set(
+        base*(0.92+rnd((bi+1)*501+i*19)*0.20),
+        base*(0.86+rnd((bi+1)*601+i*23)*0.22),
+        base*(0.90+rnd((bi+1)*701+i*29)*0.20)
+      );
+      const q=new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,1,0),pos.clone().normalize());
+      puff.quaternion.copy(q);
+      puff.rotateY(a);
+      puff.userData.home=pos.clone();
+      group.add(puff);
+    }
+  });
+  status('Phase 1.3 clouds ready: rounded global cumulus clusters with soft shadows and slow wind drift');
+}
+
+function toggleCollisionDebug(){
+ collisionDebug=!collisionDebug;
+ if(!debugRoot){debugRoot=new THREE.Group();scene.add(debugRoot);}
+ debugRoot.visible=collisionDebug;
+ status('Collision Debug: '+(collisionDebug?'ON':'OFF'));
+}
+
+function toggleClouds(){
+  cloudsVisible=!cloudsVisible;
+  if(cloudRoot) cloudRoot.visible=cloudsVisible;
+  if(cloudShadowRoot) cloudShadowRoot.visible=cloudsVisible;
+  status('Clouds: '+(cloudsVisible?'ON':'OFF'));
+}
+function updateClouds(t){
+  if(!cloudRoot) return;
+  const tmpQ=new THREE.Quaternion();
+
+  // Slow wind-current drift: entire cloud clusters rotate subtly around Earth.
+  cloudRoot.children.forEach((g,gi)=>{
+    const ud=g.userData||{};
+    if(ud.windAxis){
+      tmpQ.setFromAxisAngle(ud.windAxis, ud.windPhase + t*ud.windSpeed);
+      g.quaternion.copy(tmpQ);
+    }
+    g.children.forEach((p,i)=>{
+      const h=p.userData.home;
+      if(h){
+        const d=h.clone().normalize();
+        p.position.copy(h).addScaledVector(d,Math.sin(t*0.18+gi*1.7+i*.37)*0.018);
+      }
+    });
+  });
+
+  // Cloud shadows: one local tangent decal per cloud bank. These are intentionally
+  // surface meshes, not shader repeats and not per-puff marks.
+  if(cloudShadowRoot){
+    const camDir=camera.position.clone().normalize();
+    cloudShadowRoot.children.forEach((sh,i)=>{
+      const ud=sh.userData||{};
+      if(!ud.homeDir||!ud.windAxis) return;
+      tmpQ.setFromAxisAngle(ud.windAxis, ud.windPhase + t*ud.windSpeed);
+      const dir=ud.homeDir.clone().applyQuaternion(tmpQ).normalize();
+      const pos=dir.clone().multiplyScalar(earthR+0.135);
+
+      // Build a stable tangent basis at the projected surface point.
+      let east=new THREE.Vector3(0,1,0).cross(dir);
+      if(east.lengthSq()<0.0001) east.set(1,0,0).cross(dir);
+      east.normalize();
+      const north=new THREE.Vector3().crossVectors(dir,east).normalize();
+      const basis=new THREE.Matrix4().makeBasis(east,north,dir);
+      sh.position.copy(pos);
+      sh.quaternion.setFromRotationMatrix(basis);
+
+      // Hide far-side decals before depth precision can make them sparkle at the limb.
+      const facing=dir.dot(camDir);
+      sh.visible=facing>-0.08 && cloudsVisible;
+      const breathe=0.88+0.07*Math.sin(t*0.10+i*0.73);
+      sh.scale.set(ud.baseScale.x*breathe,ud.baseScale.y*(0.96+0.04*Math.sin(t*0.07+i)),1);
+      sh.material.opacity=ud.opacityBase*(0.86+0.10*Math.sin(t*0.11+i*0.73));
+    });
+  }
+}
+function makeEarth(){
+  const base=tex(ASSET.base,{srgb:true,aniso:12});
+  const nasaAtlas=tex(ASSET.nasaAtlas,{srgb:true,aniso:16});
+  const topo=tex(ASSET.topo,{aniso:8});
+  const heightNormal=tex(ASSET.heightNormal,{aniso:8});
+  const bathy=tex(ASSET.bathy,{aniso:8});
+  const land=tex(ASSET.land,{aniso:8});
+  const coast=tex(ASSET.coast,{aniso:8});
+  const shore=tex(ASSET.shore,{aniso:8});
+  const lakes=tex(ASSET.lakes,{aniso:8});
+  const waveA=tex(ASSET.waveA,{repeat:true,aniso:6});
+  const waveB=tex(ASSET.waveB,{repeat:true,aniso:6});
+  const waterN=tex(ASSET.waterNormal,{repeat:true,aniso:6});
+  const oceanColor=tex(ASSET.oceanColor,{srgb:true,aniso:12});
+  const chloro=tex(ASSET.chloro,{aniso:8});
+  const shallow=tex(ASSET.shallow,{aniso:8});
+  earthMat=new THREE.ShaderMaterial({
+    uniforms:{time:{value:0},baseMap:{value:base},nasaAtlas:{value:nasaAtlas},useNasaTiles:{value:1.0},topoMap:{value:topo},heightNormalMap:{value:heightNormal},landMap:{value:land},coastMap:{value:coast},shoreMap:{value:shore},lakeMap:{value:lakes},waveA:{value:waveA},waterNormal:{value:waterN},oceanColorMap:{value:oceanColor},chloroMap:{value:chloro},shallowMap:{value:shallow},sunDir:{value:new THREE.Vector3(-0.62,0.55,0.45).normalize()},dragonGroundDir:{value:new THREE.Vector3(.20,.55,.81).normalize()},detailBoost:{value:1.0},dragonShimmerStrength:{value:0.55},dragonShadowStrength:{value:0.42}},
+    vertexShader:`
+      varying vec2 vUv; varying vec3 vN; varying vec3 vW; varying float vH; varying float vLand;
+      uniform sampler2D topoMap; uniform sampler2D landMap; uniform sampler2D shoreMap;
+      float L(vec3 c){return dot(c,vec3(.299,.587,.114));}
+      float topoBlur(vec2 uv){
+        vec2 px=vec2(1.0/2048.0,1.0/1024.0);
+        float h=L(texture2D(topoMap,uv).rgb)*.38;
+        h+=L(texture2D(topoMap,uv+vec2(px.x,0.)).rgb)*.155;
+        h+=L(texture2D(topoMap,uv-vec2(px.x,0.)).rgb)*.155;
+        h+=L(texture2D(topoMap,uv+vec2(0.,px.y)).rgb)*.155;
+        h+=L(texture2D(topoMap,uv-vec2(0.,px.y)).rgb)*.155;
+        return h;
+      }
+      void main(){
+        vUv=uv;
+        float lm=texture2D(landMap,uv).r;
+        float land=smoothstep(.34,.50,lm);
+        float shore=texture2D(shoreMap,uv).r;
+        float coastFlatten=smoothstep(.08,.33,shore);
+        float h=topoBlur(uv);
+        // Remap NASA topo into visible but soft game-style relief.
+        h=smoothstep(.035,.50,h);
+        h=pow(h,1.12);
+        vH=h; vLand=land;
+        // Moderate lowland / island uplift: keeps islands above water, but reduces
+        // the previously exaggerated coastal elevation so shorelines feel more natural.
+        float minLandLift = 0.072;
+        float coastalBaseLift = mix(0.038, 0.006, coastFlatten);
+        float raisedRelief = minLandLift + coastalBaseLift + h * 0.300;
+        vec3 p = position + normal * land * raisedRelief;
+        vec4 wp=modelMatrix*vec4(p,1.0);
+        vW=wp.xyz; vN=normalize(normalMatrix*normal);
+        gl_Position=projectionMatrix*viewMatrix*wp;
+      }`,
+    fragmentShader:`
+      precision highp float;
+      varying vec2 vUv; varying vec3 vN; varying vec3 vW; varying float vH; varying float vLand;
+      uniform float time; uniform float detailBoost; uniform float dragonShimmerStrength; uniform float dragonShadowStrength; uniform vec3 sunDir; uniform vec3 dragonGroundDir;
+      uniform sampler2D baseMap,topoMap,heightNormalMap,landMap,coastMap,shoreMap,lakeMap,waveA,waterNormal,oceanColorMap,chloroMap,shallowMap;
+      uniform sampler2D nasaAtlas;
+      uniform float useNasaTiles;
+      float L(vec3 c){return dot(c,vec3(.299,.587,.114));}
+      vec3 sat(vec3 c,float s){float l=L(c);return mix(vec3(l),c,s);} 
+      vec3 con(vec3 c,float k){return (c-.5)*k+.5;}
+      float rand(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
+      vec3 sampleNasaTile(vec2 uv){
+        // NASA BMNG 8-tile layout packed into a single 8192x4096 atlas.
+        // Atlas columns west->east: A, B, C, D. Rows north->south: 1, 2.
+        // This keeps the tiled quality while using only one sampler, fixing:
+        // MAX_TEXTURE_IMAGE_UNITS(16) shader compile failures.
+        vec2 auv = vec2(clamp(uv.x, 0.0, 1.0), clamp(uv.y, 0.0, 1.0));
+        return texture2D(nasaAtlas, auv).rgb;
+      }
+      vec3 sampleBaseColor(vec2 uv){
+        vec3 low=texture2D(baseMap,uv).rgb;
+        vec3 hi=sampleNasaTile(uv);
+        // The fallback low-res map remains available, but the NASA tile set is now the primary base.
+        return mix(low,hi,clamp(useNasaTiles,0.0,1.0));
+      }
+      vec3 detailContrast(vec3 c){ c=sat(con(c,1.34),1.22); return c; }
+      vec3 triWeights(vec3 n){ vec3 w=pow(abs(n),vec3(4.0)); return w/(w.x+w.y+w.z+0.0001); }
+      void main(){
+        vec3 N=normalize(vN), V=normalize(cameraPosition-vW), S=normalize(sunDir);
+        // Precomputed height-derived normal map from Topo.jpg: gives SebLague-style slope shading
+        // without relying on sharp geometry displacement or expensive per-frame readback.
+        // SebLague-style spherical height normal. This texture is generated once from
+        // neighboring displaced sphere points: normal = cross(north-south, east-west).
+        // It is stored as RGB = normal * 0.5 + 0.5, A = height.
+        vec4 hPack = texture2D(heightNormalMap, vUv);
+        vec3 heightN = normalize(hPack.rgb * 2.0 - 1.0);
+        // Use the mathematically correct spherical terrain normal as the macro normal.
+        // Blend rather than replace so lowlands remain smooth and stylized.
+        N = normalize(mix(N, heightN, 0.74 * texture2D(landMap, vUv).r));
+        float ndl=max(dot(N,S),0.0);
+        float light=.76+.33*ndl+.10*pow(ndl,4.0);
+        float lm=texture2D(landMap,vUv).r;
+        float land=smoothstep(.34,.50,lm);
+        float ocean=1.0-land;
+        float shore=texture2D(shoreMap,vUv).r;
+        float coast=L(texture2D(coastMap,vUv).rgb);
+        
+        float topo=L(texture2D(topoMap,vUv).rgb);
+        float lat=abs(vUv.y-.5)*2.0;
+        vec3 satBase=sat(con(sampleBaseColor(vUv),1.12),1.27);
+        float green=max(satBase.g-max(satBase.r,satBase.b),0.0);
+        float snowMask=max(smoothstep(.72,.92,L(satBase))*0.75, smoothstep(.66,.93,lat)*0.68);
+        snowMask=max(snowMask,smoothstep(.50,.78,vH)*smoothstep(.35,.62,lat));
+        snowMask*=land;
+        float mountain=smoothstep(.30,.78,vH)*land;
+        float desert=smoothstep(.05,.20,satBase.r-satBase.b)*smoothstep(.26,.62,satBase.r)*land*(1.0-snowMask);
+        float forest=smoothstep(.012,.13,green)*land*(1.0-snowMask*.8)*(1.0-desert*.55);
+        vec3 landCol=satBase;
+        landCol=mix(landCol,vec3(.13,.39,.16),forest*.45);
+        landCol=mix(landCol,vec3(.68,.50,.25),desert*.48);
+        landCol=mix(landCol,vec3(.40,.39,.32),mountain*.32*(1.0-snowMask));
+        landCol=mix(landCol,vec3(.90,.91,.86),snowMask*.72);
+        // PBR/triplanar biome detail disabled.
+        // The uploaded PBR atlases caused visible diagonal/grid artifacts on land at low altitude.
+        // Land now uses the high-quality Base/Topo maps plus macro height-normal lighting only.
+        float dBoost = detailBoost * land;
+        vec3 detailN = N;
+        float normalWeight = 0.0;
+        float biomeRoughMix = 0.62;
+        // Soft topo shading without sharp spikes.
+        float ridge=pow(clamp(vH,0.0,1.0),1.12);
+        float fineGrain=(rand(floor(vUv*vec2(2100.0,1050.0)))-.5)*.034*dBoost;
+        landCol*=.86+ridge*.38+fineGrain;
+        // SebLague-style ocean base upgraded with the supplied Ocean / Chloro / Shallow masks.
+        // Ocean.png provides global bathymetry colour; Chloro adds soft biological/coastal variation;
+        // the shallow mask is only a subtle tint, not a broad static shelf band.
+        vec3 deep=vec3(.010,.105,.34);
+        vec3 mid=vec3(.025,.34,.62);
+        vec3 oceanTex=texture2D(oceanColorMap,vUv).rgb;
+        oceanTex=sat(con(oceanTex,1.08),1.16);
+        float oceanLum=L(oceanTex);
+        vec3 proceduralOcean=mix(deep,mid,smoothstep(.05,.55,oceanLum));
+        vec3 water=mix(proceduralOcean,oceanTex,.68);
+        float shallow=L(texture2D(shallowMap,vUv).rgb);
+        float chl=L(texture2D(chloroMap,vUv).rgb);
+        // Keep shallow influence darker/turquoise and conservative so it does not become the old pale band.
+        float shallowWater=ocean*smoothstep(.18,.78,shallow)*(1.0-smoothstep(.72,.98,shallow));
+        water=mix(water, vec3(.018,.34,.56), shallowWater*.18);
+        water+=vec3(-.018,.050,.030) * smoothstep(.10,.72,chl) * ocean * .42;
+        water=mix(water, vec3(.006,.070,.22), ocean*(1.0-smoothstep(.10,.50,oceanLum))*.14);
+        vec2 w1=vUv*vec2(34.,17.)+vec2(time*.020,time*.006);
+        vec2 w2=vUv*vec2(92.,46.)+vec2(-time*.014,time*.018);
+        vec2 w3=vUv*vec2(128.,64.)+vec2(time*.008,-time*.015);
+        float wa=L(texture2D(waveA,w1).rgb), wb=L(texture2D(waveA,w2).rgb);
+        vec3 wn=texture2D(waterNormal,w3).rgb*2.0-1.0;
+        float wave=wa*.42+wb*.38+(wn.z*.5+.5)*.20;
+        vec3 H=normalize(S+V);
+        float spec=pow(max(dot(normalize(N+wn*.15*ocean),H),0.0),88.0)*ocean*(.35+.65*wave);
+        water+=vec3(.030,.085,.135)*(wave-.45);
+        water+=vec3(.68,.92,1.0)*spec*.75;
+
+        // Subtle gameplay shimmer directly beneath the dragon. This is intentionally
+        // separate from the real sun/camera specular above, so the cinematic glint
+        // remains physically plausible while the player still gets a readable
+        // water glimmer at the dragon's ground point.
+        vec3 sphereDir = normalize(vW);
+        float dragonDot = max(dot(sphereDir, normalize(dragonGroundDir)), 0.0);
+        float dragonHot = pow(dragonDot, 520.0);
+        float dragonHalo = pow(dragonDot, 145.0) * 0.28;
+        float dragonRipple = 0.72 + 0.28 * sin(time * 4.2 + wave * 9.0);
+        float dragonWaterShimmer = (dragonHot + dragonHalo) * dragonRipple * dragonShimmerStrength * ocean;
+        water += vec3(.58,.88,1.0) * dragonWaterShimmer;
+        // Crisp shoreline waves generated from the coastline distance field.
+        // Tightened range: the surf is closer to shore and does not extend far offshore.
+        float dstFromShore = shore;
+        float innerFade = smoothstep(0.0012, 0.0032, dstFromShore);
+        float outerFade = 1.0 - smoothstep(0.0075, 0.0145, dstFromShore);
+        float shoreFalloff = innerFade * outerFade;
+        shoreFalloff *= shoreFalloff;
+        float shoreBand = ocean * shoreFalloff;
+
+        // Shoreline wave train: continuous everywhere.
+        // Use a repeating phase ramp instead of a global on/off sine threshold, so foam
+        // bands never disappear after a few waves. Local phase varies by position only.
+        float shoreScale = 260.0;      // spacing between crests; higher = closer bands
+        float scrollSpeed = 0.34;      // slow continuous movement
+
+        // Very low distortion: keeps the wave lines clean and avoids noisy overlap.
+        float shoreNoise = (wave - 0.5) * 0.000003 * shoreFalloff;
+        float distortedDst = max(0.0, dstFromShore + shoreNoise);
+
+        // Smooth spatial phase offset only. This is NOT a timing gate. Every coastline
+        // animates continuously, but different places start at a different wave phase.
+        float phaseA = sin(vUv.x * 31.7 + vUv.y * 19.3);
+        float phaseB = sin(vUv.x * 83.1 - vUv.y * 47.9);
+        float localPhase = (phaseA * 0.65 + phaseB * 0.35) * 0.38;
+
+        // Repeating triangular crest signal. Because it is based on fract(), there is
+        // always a sequence of waves in the shoreline band rather than a few waves then stop.
+        float wavePhase = distortedDst * shoreScale - time * scrollSpeed + localPhase;
+        float crest = 1.0 - abs(fract(wavePhase) - 0.5) * 2.0;
+
+        // Volumetric surf: wider/noisier body plus a bright core.
+        // Noise fattens the lines unevenly so they read as foam volume, not thin vectors.
+        float foamNoiseA = L(texture2D(waveA, vUv * vec2(62.0, 31.0) + vec2(time * 0.010, -time * 0.004)).rgb);
+        float foamNoiseB = L(texture2D(waveA, vUv * vec2(121.0, 58.0) + vec2(-time * 0.006, time * 0.009)).rgb);
+        float foamNoise = foamNoiseA * 0.65 + foamNoiseB * 0.35;
+        float noisyCrest = clamp(crest + (foamNoise - 0.5) * 0.18, 0.0, 1.0);
+        float foamBody = smoothstep(0.54, 0.90, noisyCrest);
+        float foamCore = smoothstep(0.78, 0.975, noisyCrest);
+        float foamWave = clamp(foamBody * 0.48 + foamCore * 0.74, 0.0, 1.0);
+
+        // Break up the foam edge while keeping continuous wave trains.
+        float patchA = L(texture2D(waveA, vUv * vec2(40.0, 20.0) + vec2(time * 0.006, 0.0)).rgb);
+        float surfBreakup = mix(0.88, 1.12, smoothstep(0.34, 0.92, patchA));
+        float foam = shoreBand * foamWave * surfBreakup;
+        vec3 foamWhite = vec3(1.0, 1.0, 1.0);
+        vec3 foamTint = vec3(0.68, 0.92, 1.0);
+        water += foamTint * foam * 0.18;
+        water=mix(water,foamWhite,foam*.72);
+        vec3 col=mix(water,landCol,land);
+
+        // Lakes are applied as a final overlay below, after land/ocean/shore post-processing.
+        // This prevents shallow/coast/lighting passes from covering or darkening them.
+
+        // Thin smooth ink coastline for readability without the broad black shore band.
+        // Coastline ink should not darken/tint the land side of the coast.
+        // Keep the readability line only on ocean pixels so the dark green/grey land halo disappears.
+        float ink=smoothstep(.72,.96,coast) * (1.0-smoothstep(.045,.125,shore)) * ocean;
+        col=mix(col,vec3(.006,.011,.012),ink*.26);
+        col=mix(col,vec3(1.0),foam*.06);
+
+        // Rivers removed; Lakes.png is integrated as the only inland-water overlay.
+        col*=mix(light, .92 + .16*ndl, land);
+        col=sat(con(col,1.08),1.10);
+        col=pow(max(col,0.0),vec3(.92));
+
+        // FINAL LAKE PASS
+        // Draw lakes after all land/ocean/coast effects so they sit visibly on top of terrain.
+        // Do not multiply by landMap or shore distance: those masks can classify inland
+        // water as non-land or fade out anything far from the ocean coastline.
+        float lakeMask = smoothstep(0.10, 0.46, texture2D(lakeMap, vUv).r);
+
+        vec2 lakeUvA = vUv * vec2(82.0, 41.0) + vec2(time * 0.010, -time * 0.006);
+        vec2 lakeUvB = vUv * vec2(37.0, 19.0) + vec2(-time * 0.005, time * 0.008);
+        vec3 lakeWnA = texture2D(waterNormal, lakeUvA).rgb * 2.0 - 1.0;
+        vec3 lakeWnB = texture2D(waterNormal, lakeUvB).rgb * 2.0 - 1.0;
+        vec3 lakeWn = normalize(lakeWnA * 0.65 + lakeWnB * 0.35);
+        vec3 lakeN = normalize(N + lakeWn * 0.34);
+        float lakeRipple = clamp((lakeWn.z * 0.5 + 0.5) * 0.72 + wave * 0.28, 0.0, 1.0);
+
+        vec3 lakeBase = mix(vec3(.006,.075,.200), vec3(.020,.245,.430), lakeRipple*.55+.24);
+        float lakeLight = mix(0.88, 1.15, max(dot(lakeN, S), 0.0));
+        float lakeFacing = max(dot(lakeN, V), 0.0);
+        float lakeFresnel = pow(1.0 - lakeFacing, 3.0);
+        float lakeSpecCore = pow(max(dot(lakeN, H), 0.0), 88.0);
+        float lakeSpecWide = pow(max(dot(lakeN, H), 0.0), 26.0) * 0.24;
+        float lakeSpec = (lakeSpecCore + lakeSpecWide) * (0.42 + 0.58 * lakeRipple);
+        float lakeDragonShimmer = (dragonHot + dragonHalo) * (0.70 + 0.30 * lakeRipple) * dragonShimmerStrength * lakeMask;
+        vec3 lakeCol = lakeBase * lakeLight;
+        lakeCol += mix(vec3(.08,.22,.36), vec3(.78,.94,1.0), lakeFresnel) * lakeFresnel * 0.16;
+        lakeCol += vec3(.70,.93,1.0) * lakeSpec * 0.90;
+        lakeCol += vec3(.62,.90,1.0) * lakeDragonShimmer * 1.05;
+        lakeCol = sat(con(lakeCol, 1.06), 1.08);
+        lakeCol = pow(max(lakeCol,0.0), vec3(.92));
+        col = mix(col, lakeCol, lakeMask * 0.995);
+
+        // FINAL DRAGON SHADOW DECAL
+        // This is intentionally applied after the lake overlay, so lakes cannot cover it.
+        // The real Three.js mesh shadow receiver is still present for animated silhouettes,
+        // but this shader decal guarantees a readable shadow over land and inland lakes.
+        float shadowDot = max(dot(normalize(vW), normalize(dragonGroundDir)), 0.0);
+        float shadowCore = pow(shadowDot, 260.0);
+        float shadowSoft = pow(shadowDot, 82.0) * 0.42;
+        float dragonShadow = clamp((shadowCore + shadowSoft) * dragonShadowStrength, 0.0, 0.55);
+        float landShadowMask = max(land, lakeMask);
+        float shadowOpacity = mix(0.10, 0.34, landShadowMask);
+        shadowOpacity = mix(shadowOpacity, 0.22, lakeMask);
+        col *= (1.0 - dragonShadow * shadowOpacity);
+
+        gl_FragColor=vec4(col,1.0);
+      }`
+  });
+  earth=new THREE.Mesh(new THREE.SphereBufferGeometry(earthR,320,160),earthMat);
+  scene.add(earth);
+  // A very light specular water shell to make the scrolling ocean normals readable.
+  const shellMat=new THREE.ShaderMaterial({transparent:true,depthWrite:false,uniforms:{time:{value:0},landMap:{value:land},shoreMap:{value:shore},lakeMap:{value:lakes},waveA:{value:waveA}},vertexShader:`varying vec2 vUv;void main(){vUv=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}`,fragmentShader:`precision highp float;varying vec2 vUv;uniform float time;uniform sampler2D landMap,shoreMap,lakeMap,waveA;float L(vec3 c){return dot(c,vec3(.299,.587,.114));}void main(){float land=smoothstep(.34,.50,texture2D(landMap,vUv).r);float ocean=1.0-land;float lake=smoothstep(.10,.46,texture2D(lakeMap,vUv).r);float sh=texture2D(shoreMap,vUv).r;float w=L(texture2D(waveA,vUv*50.0+vec2(time*.02,0.)).rgb)*.5+L(texture2D(waveA,vUv*88.0+vec2(0.,time*.017)).rgb)*.5;float oceanA=ocean*(.006+.020*smoothstep(.10,.70,sh))*smoothstep(.62,.92,w);float lakeA=lake*(.014+.052*smoothstep(.50,.92,w));gl_FragColor=vec4(.62,.92,1.0,oceanA+lakeA);}`});
+  const shell=new THREE.Mesh(new THREE.SphereBufferGeometry(earthR+.018,256,128),shellMat);
+  shell.userData.isWaterShell=true; scene.add(shell);
+}
+
+function makeFireFlipbookMaterial(texture, opts={}){
+  return new THREE.ShaderMaterial({
+    transparent:true,
+    depthWrite:false,
+    depthTest:true,
+    blending:THREE.AdditiveBlending,
+    side:THREE.DoubleSide,
+    uniforms:{map:{value:texture},frame:{value:0},rows:{value:8},cols:{value:8},intensity:{value:opts.intensity||1.4},alphaBoost:{value:opts.alphaBoost||1.0},wind:{value:0.0},time:{value:0.0},visibility:{value:0.0}},
+    vertexShader:`
+      varying vec2 vUv;
+      uniform float wind; uniform float time;
+      void main(){
+        vUv=uv;
+        vec3 p=position;
+        float h=smoothstep(0.0,1.0,uv.y);
+        p.x += wind*h*h*0.45;
+        p.x += sin(time*7.0 + uv.y*10.0) * 0.035 * h;
+        gl_Position=projectionMatrix*modelViewMatrix*vec4(p,1.0);
+      }`,
+    fragmentShader:`
+      precision highp float;
+      uniform sampler2D map; uniform float frame; uniform float rows; uniform float cols; uniform float intensity; uniform float alphaBoost; uniform float visibility;
+      varying vec2 vUv;
+      void main(){
+        float f=mod(frame,rows*cols);
+        float col=mod(f,cols);
+        float row=floor(f/cols);
+        vec2 sheetUv=vec2((col+vUv.x)/cols,(rows-1.0-row+vUv.y)/rows);
+        vec4 tex=texture2D(map,sheetUv);
+        float luma=max(max(tex.r,tex.g),tex.b);
+        float a=max(tex.a,smoothstep(0.02,0.20,luma));
+        a*=alphaBoost*visibility;
+        a*=smoothstep(0.0,0.08,vUv.y)*smoothstep(1.0,0.78,vUv.y);
+        if(a<0.01) discard;
+        gl_FragColor=vec4(tex.rgb*intensity,a);
+      }`
+  });
+}
+function addFirePlane(parent,name,w,h,mat,pos,rot,renderOrder){
+  const mesh=new THREE.Mesh(new THREE.PlaneBufferGeometry(w,h,1,16),mat);
+  mesh.name=name; mesh.position.set(pos[0],pos[1],pos[2]); mesh.rotation.set(rot[0],rot[1],rot[2]); mesh.renderOrder=renderOrder; parent.add(mesh); return mesh;
+}
+function makeFireBreath(){
+  if(fireBreath && fireBreath.parent) fireBreath.parent.remove(fireBreath);
+  const loader=new THREE.TextureLoader();
+  const side=loader.load(ASSET.fireSide), iso=loader.load(ASSET.fireIso), topTex=loader.load(ASSET.fireTop);
+  [side,iso,topTex].forEach(t=>{t.encoding=THREE.sRGBEncoding;t.wrapS=t.wrapT=THREE.RepeatWrapping;t.magFilter=THREE.LinearFilter;t.minFilter=THREE.LinearMipMapLinearFilter;t.repeat.set(1/8,1/8);});
+  fireBreath=new THREE.Group(); fireBreath.name='DragonMouth3DFlipbookFire'; fireBreath.visible=false;
+  // The standalone 3D flame grows upward on +Y. It is kept as a scene-level object
+  // and matched every frame to FireBreath.28's world transform. This avoids inheriting
+  // the dragon model's tiny normalization scale, which can make the fire disappear.
+  fireBreath.rotation.copy(FIRE_BONE_LOCAL_ROTATION);
+  fireBreath.position.set(0,0,0);
+  fireBreath.scale.setScalar(FIRE_BONE_SCALE);
+  const sideMatA=makeFireFlipbookMaterial(side,{intensity:1.55,alphaBoost:1.0});
+  const sideMatB=makeFireFlipbookMaterial(side,{intensity:1.28,alphaBoost:0.78});
+  const isoMat=makeFireFlipbookMaterial(iso,{intensity:1.34,alphaBoost:0.82});
+  const topMat=makeFireFlipbookMaterial(topTex,{intensity:1.42,alphaBoost:0.78});
+  fireMats=[sideMatA,sideMatB,isoMat,topMat];
+  addFirePlane(fireBreath,'fire-side-main',1.55,2.65,sideMatA,[0,1.18,0],[0,0,0],220);
+  addFirePlane(fireBreath,'fire-side-cross',1.32,2.45,sideMatB,[0,1.10,0],[0,Math.PI/2,0],221);
+  addFirePlane(fireBreath,'fire-isometric-diagonal',1.68,2.55,isoMat,[0,1.14,0],[0,Math.PI/4,0],222);
+  // Use the top flipbook as a third lengthwise sheet, not as a cross-section.
+  // The previous perpendicular plane created the visible orange disc/ring near the mouth.
+  fireTopPlane=addFirePlane(fireBreath,'fire-top-lengthwise',1.45,2.42,topMat,[0,1.08,0],[0,-Math.PI/4,0],223);
+  const glowMat=new THREE.MeshBasicMaterial({color:0xff6a00,transparent:true,opacity:0.0,blending:THREE.AdditiveBlending,depthWrite:false});
+  fireGlow=new THREE.Mesh(new THREE.CircleBufferGeometry(1.15,48),glowMat); fireGlow.rotation.x=-Math.PI/2; fireGlow.position.y=0.02; fireGlow.renderOrder=219; fireBreath.add(fireGlow);
+  scene.add(fireBreath);
+}
+function findMouthBone(root){
+  // Prefer the animator-authored fire breath bone. This is the true mouth anchor.
+  const exact=root.getObjectByName(FIRE_BONE_NAME);
+  if(exact) return exact;
+  const exactLower=FIRE_BONE_NAME.toLowerCase();
+  let fireCandidate=null;
+  root.traverse(o=>{
+    const n=(o.name||'').toLowerCase();
+    if(!fireCandidate && n===exactLower) fireCandidate=o;
+    if(!fireCandidate && /firebreath|fire_breath|fire breath/.test(n)) fireCandidate=o;
+  });
+  if(fireCandidate) return fireCandidate;
+
+  // Fallback for other dragon models without a fire-breath bone.
+  let candidates=[];
+  root.traverse(o=>{ if(o.isBone){ const n=(o.name||'').toLowerCase(); if(/mouth|jaw|head|neck/.test(n)) candidates.push(o); }});
+  const score=n=>/mouth/.test(n)?4:/jaw/.test(n)?3:/head/.test(n)?2:/neck/.test(n)?1:0;
+  candidates.sort((a,b)=>score((b.name||'').toLowerCase())-score((a.name||'').toLowerCase()));
+  return candidates[0]||null;
+}
+function updateFireBreath(t){
+  if(!fireBreath) return;
+  const visTarget=keys.space?1.0:0.0;
+  fireActive = fireActive || visTarget>0.0;
+  let anyVisible=false;
+  const fps=26, offsets=[0,13,29,7];
+  for(let i=0;i<fireMats.length;i++){
+    const m=fireMats[i];
+    m.uniforms.frame.value=Math.floor(t*fps+offsets[i])%64;
+    m.uniforms.time.value=t;
+    m.uniforms.wind.value=0.10+0.04*Math.sin(t*2.0);
+    const current=m.uniforms.visibility.value;
+    const next=current+(visTarget-current)*0.36;
+    m.uniforms.visibility.value=next;
+    if(next>0.02) anyVisible=true;
+  }
+  fireBreath.visible=anyVisible;
+  if(fireGlow) fireGlow.material.opacity=(0.10+0.07*Math.sin(t*18.0))*fireMats[0].uniforms.visibility.value;
+  // Active position/orientation control: use the animator-authored FireBreath.28 bone
+  // as a WORLD anchor, but keep the fire as a scene child so its scale stays visible.
+  if(mouthBone){
+    mouthBone.updateWorldMatrix(true,false);
+    mouthBone.getWorldPosition(_fireWorldPos);
+    mouthBone.getWorldQuaternion(_fireWorldQuat);
+    _fireLocalOffset.copy(FIRE_BONE_LOCAL_OFFSET).applyQuaternion(_fireWorldQuat);
+    fireBreath.position.copy(_fireWorldPos).add(_fireLocalOffset);
+    fireBreath.quaternion.copy(_fireWorldQuat).multiply(_fireLocalRotQuat);
+    fireBreath.scale.setScalar(FIRE_BONE_SCALE);
+  }
+}
+
+
+function loadDolphinWaterMasks(){
+  const loadMask=(src,onReady)=>{
+    const img=new Image();
+    img.onload=()=>{
+      const c=document.createElement('canvas'); c.width=img.width; c.height=img.height;
+      const ctx=c.getContext('2d',{willReadFrequently:true}); ctx.drawImage(img,0,0);
+      onReady(c,ctx);
+    };
+    img.src=src;
+  };
+  // Source of truth for dolphin spawning. No land/shore/lake/NASA-colour checks are used anymore.
+  loadMask(ASSET.dolphinSpawnMask,(c,ctx)=>{
+    dolphinSpawnCanvas=c;
+    dolphinSpawnCtx=ctx;
+    createDolphinAllowedDirectionCache(c,ctx);
+    createDolphinSpawnBorderOverlay(c,ctx);
+  });
+}
+function uvToDir(u,v){
+  // CPU mask coordinates use image convention: v=0 is the top/north edge,
+  // v=1 is the bottom/south edge. This matches the hand-painted dolphin map.
+  const lat=(0.5-v)*Math.PI;
+  const y=Math.sin(lat);
+  const h=Math.cos(lat);
+  const a=u*Math.PI*2.0;
+  return new THREE.Vector3(-Math.cos(a)*h,y,Math.sin(a)*h).normalize();
+}
+function hardMaskPixelAllowed(ctx,canvas,x,y){
+  if(!ctx||!canvas) return false;
+  x=((x%canvas.width)+canvas.width)%canvas.width;
+  y=Math.max(0,Math.min(canvas.height-1,y));
+  return ctx.getImageData(x,y,1,1).data[0]/255>DOLPHIN_MASK_THRESHOLD;
+}
+function hardMaskPixelEroded(ctx,canvas,x,y,padPx){
+  if(!hardMaskPixelAllowed(ctx,canvas,x,y)) return false;
+  const checks=[[padPx,0],[-padPx,0],[0,padPx],[0,-padPx],[padPx,padPx],[-padPx,padPx],[padPx,-padPx],[-padPx,-padPx],[padPx*2,0],[-padPx*2,0],[0,padPx*2],[0,-padPx*2]];
+  for(const c of checks){ if(!hardMaskPixelAllowed(ctx,canvas,x+c[0],y+c[1])) return false; }
+  return true;
+}
+function createDolphinAllowedDirectionCache(maskCanvas,maskCtx){
+  dolphinAllowedDirections=[];
+  if(!maskCanvas||!maskCtx) return;
+  // HARD SOURCE OF TRUTH: dolphins can only be spawned from pixels inside dolphin_spawn_mask.png.
+  // This list is precomputed from an eroded version of the exact mask so every candidate is safely
+  // inside the visible B-toggle territory. No legacy ocean/shore/zone logic participates.
+  const stride=6;
+  const padPx=10;
+  for(let y=padPx*2;y<maskCanvas.height-padPx*2;y+=stride){
+    for(let x=0;x<maskCanvas.width;x+=stride){
+      if(!hardMaskPixelEroded(maskCtx,maskCanvas,x,y,padPx)) continue;
+      const u=(x+0.5)/maskCanvas.width;
+      const v=(y+0.5)/maskCanvas.height;
+      dolphinAllowedDirections.push(uvToDir(u,v));
+    }
+  }
+  status('Dolphin mask hard zones ready: '+dolphinAllowedDirections.length+' allowed samples');
+}
+function createDolphinSpawnBorderOverlay(maskCanvas,maskCtx){
+  if(!scene || !maskCanvas || !maskCtx) return;
+
+  // SOURCE OF TRUTH VISUALIZER:
+  // The B-toggle displays the hand-painted dolphin_spawn_mask.png exactly as a texture-mapped
+  // layer on the Earth. No erosion, no remapping, no polygon reconstruction. What you see
+  // here is the canonical dolphin territory. Only the spawn sampler applies a small inset.
+  const tex=new THREE.CanvasTexture(maskCanvas);
+  tex.wrapS=THREE.RepeatWrapping;
+  tex.wrapT=THREE.ClampToEdgeWrapping;
+  tex.minFilter=THREE.LinearFilter;
+  tex.magFilter=THREE.LinearFilter;
+  tex.generateMipmaps=false;
+  tex.needsUpdate=true;
+
+  const mat=new THREE.ShaderMaterial({
+    uniforms:{
+      uMask:{value:tex},
+      uThreshold:{value:DOLPHIN_MASK_THRESHOLD},
+      uEdge:{value:DOLPHIN_MASK_EDGE_DEBUG},
+      uFillAlpha:{value:0.18},
+      uBorderAlpha:{value:0.95}
+    },
+    vertexShader:`
+      varying vec2 vUv;
+      void main(){
+        vUv=uv;
+        gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);
+      }
+    `,
+    fragmentShader:`
+      uniform sampler2D uMask;
+      uniform float uThreshold;
+      uniform float uEdge;
+      uniform float uFillAlpha;
+      uniform float uBorderAlpha;
+      varying vec2 vUv;
+      float m(vec2 uv){return texture2D(uMask,vec2(fract(uv.x),clamp(uv.y,0.0,1.0))).r;}
+      void main(){
+        vec2 uv=vUv;
+        float c=m(uv);
+        if(c<=uThreshold) discard;
+        float outside=0.0;
+        outside=max(outside,1.0-step(uThreshold,m(uv+vec2(uEdge,0.0))));
+        outside=max(outside,1.0-step(uThreshold,m(uv-vec2(uEdge,0.0))));
+        outside=max(outside,1.0-step(uThreshold,m(uv+vec2(0.0,uEdge))));
+        outside=max(outside,1.0-step(uThreshold,m(uv-vec2(0.0,uEdge))));
+        vec3 fill=vec3(0.75,0.02,0.08);
+        vec3 border=vec3(1.0,0.06,0.08);
+        float alpha=mix(uFillAlpha,uBorderAlpha,outside);
+        gl_FragColor=vec4(mix(fill,border,outside),alpha);
+      }
+    `,
+    transparent:true,
+    depthWrite:false,
+    depthTest:true,
+    side:THREE.DoubleSide
+  });
+  dolphinSpawnBorderMesh=new THREE.Mesh(new THREE.SphereGeometry(earthR+0.036,256,128),mat);
+  dolphinSpawnBorderMesh.visible=dolphinSpawnBorderVisible;
+  dolphinSpawnBorderMesh.renderOrder=200;
+  scene.add(dolphinSpawnBorderMesh);
+}
+function toggleDolphinSpawnBorders(){
+  dolphinSpawnBorderVisible=!dolphinSpawnBorderVisible;
+  if(dolphinSpawnBorderMesh) dolphinSpawnBorderMesh.visible=dolphinSpawnBorderVisible;
+  status('Dolphin spawn borders: '+(dolphinSpawnBorderVisible?'ON':'OFF'));
+}
+function dirToUv(d){
+  // HARD ALIGNMENT RULE:
+  // The mask image is an equirectangular atlas with north at the top of the PNG.
+  // Therefore north-pole directions must sample v=0, and south-pole directions v=1.
+  // This is the inverse of uvToDir() above and prevents north/south mirrored spawns.
+  const n=d.clone().normalize();
+  let u=Math.atan2(n.z,-n.x)/(Math.PI*2.0);
+  if(u<0) u+=1.0;
+  const v=0.5-Math.asin(clamp(n.y,-1,1))/Math.PI;
+  return {u:u-Math.floor(u),v:clamp(v,0,1)};
+}
+function sampleMask(ctx,canvas,d){
+  if(!ctx||!canvas) return 0;
+  const uv=dirToUv(d);
+  const x=Math.floor(uv.u*(canvas.width-1));
+  const y=Math.floor(uv.v*(canvas.height-1));
+  return ctx.getImageData(x,y,1,1).data[0]/255;
+}
+function sampleColor(ctx,canvas,d){
+  if(!ctx||!canvas) return null;
+  const uv=dirToUv(d);
+  const x=Math.floor(uv.u*(canvas.width-1));
+  const y=Math.floor(uv.v*(canvas.height-1));
+  const data=ctx.getImageData(x,y,1,1).data;
+  return {r:data[0]/255,g:data[1]/255,b:data[2]/255,a:data[3]/255};
+}
+function maskAllowedRaw(d){
+  return dolphinSpawnCtx ? sampleMask(dolphinSpawnCtx,dolphinSpawnCanvas,d)>DOLPHIN_MASK_THRESHOLD : false;
+}
+function isDolphinSpawnMaskDirection(d){
+  // Eroded-mask check: center plus nearby tangent samples must all be inside the hand-painted zone.
+  // This prevents dolphins/pod members from appearing just outside the visible habitat border.
+  if(!maskAllowedRaw(d)) return false;
+  const n=d.clone().normalize();
+  let a=new THREE.Vector3(0,1,0);
+  if(Math.abs(n.dot(a))>0.92) a.set(1,0,0);
+  const t1=new THREE.Vector3().crossVectors(a,n).normalize();
+  const t2=new THREE.Vector3().crossVectors(n,t1).normalize();
+  const r=DOLPHIN_MASK_INSET;
+  const checks=[
+    n.clone().addScaledVector(t1,r).normalize(),
+    n.clone().addScaledVector(t1,-r).normalize(),
+    n.clone().addScaledVector(t2,r).normalize(),
+    n.clone().addScaledVector(t2,-r).normalize(),
+    n.clone().addScaledVector(t1,r*0.72).addScaledVector(t2,r*0.72).normalize(),
+    n.clone().addScaledVector(t1,-r*0.72).addScaledVector(t2,r*0.72).normalize(),
+    n.clone().addScaledVector(t1,r*0.72).addScaledVector(t2,-r*0.72).normalize(),
+    n.clone().addScaledVector(t1,-r*0.72).addScaledVector(t2,-r*0.72).normalize()
+  ];
+  for(const c of checks){ if(!maskAllowedRaw(c)) return false; }
+  return true;
+}
+function isDolphinSpawnVisible(d,margin=0.16){
+  if(!camera) return true;
+  const pos=d.clone().normalize().multiplyScalar(earthR+DOLPHIN_SURFACE_OFFSET+0.08);
+  const cam=camera.position.clone();
+  const camDist=cam.length();
+  if(camDist>earthR){
+    const horizonCos=earthR/camDist;
+    if(d.clone().normalize().dot(cam.normalize()) < horizonCos-0.035) return false;
+  }
+  const ndc=pos.clone().project(camera);
+  return ndc.z>-1.0 && ndc.z<1.0 && ndc.x>-1.0-margin && ndc.x<1.0+margin && ndc.y>-1.0-margin && ndc.y<1.0+margin;
+}
+function dolphinMasksReady(){
+  return !!(dolphinSpawnCtx&&dolphinSpawnCanvas);
+}
+function isOceanDirection(d){
+  return isDolphinSpawnMaskDirection(d);
+}
+function isLakeDirection(d){
+  return false;
+}
+function shoreDistanceValue(d){
+  return 1.0;
+}
+function isInDolphinHabitat(d){
+  return isDolphinSpawnMaskDirection(d);
+}
+function basicDolphinOceanDirection(d){
+  return isDolphinSpawnMaskDirection(d);
+}
+function isOpenOceanDirection(d){
+  return isDolphinSpawnMaskDirection(d);
+}
+function isOpenOceanJumpPath(start,travel){
+  // Validate the full short jump path against the eroded hand-painted mask.
+  for(let p=0;p<=1.001;p+=0.125){
+    const d=start.clone().addScaledVector(travel,DOLPHIN_SURFACE_TRAVEL*p).normalize();
+    if(!isDolphinSpawnMaskDirection(d)) return false;
+  }
+  return true;
+}
+function makeSplashTexture(){
+  // Fallback texture if external splash assets are unavailable.
+  const c=document.createElement('canvas'); c.width=128; c.height=128;
+  const ctx=c.getContext('2d'); ctx.clearRect(0,0,128,128);
+  ctx.strokeStyle='rgba(215,245,255,0.92)'; ctx.lineWidth=5; ctx.lineCap='round';
+  const strokes=[
+    [64,96,58,54],[64,96,70,50],[58,98,36,72],[70,98,94,70],[54,100,20,92],[74,100,110,90],
+    [64,98,64,38],[50,102,42,58],[78,102,88,58]
+  ];
+  for(const st of strokes){ctx.beginPath(); ctx.moveTo(st[0],st[1]); ctx.quadraticCurveTo((st[0]+st[2])/2,Math.min(st[1],st[3])-14,st[2],st[3]); ctx.stroke();}
+  ctx.fillStyle='rgba(230,250,255,0.9)';
+  [[38,66,4],[91,62,4],[26,88,3],[106,84,3],[61,36,3],[78,45,3],[51,52,2.5]].forEach(d=>{ctx.beginPath();ctx.arc(d[0],d[1],d[2],0,Math.PI*2);ctx.fill();});
+  const tex=new THREE.CanvasTexture(c); tex.needsUpdate=true; return tex;
+}
+function loadDolphinWaterVfxTextures(){
+  const tl=new THREE.TextureLoader();
+  const prep=tex=>{tex.wrapS=tex.wrapT=THREE.ClampToEdgeWrapping; tex.minFilter=THREE.LinearMipMapLinearFilter; tex.magFilter=THREE.LinearFilter; tex.needsUpdate=true; return tex;};
+  dolphinFoamTexture=prep(tl.load(ASSET.foamSplash));
+  dolphinRippleTexture=prep(tl.load(ASSET.rippleHeight));
+  dolphinDropletTexture=prep(tl.load(ASSET.splashDroplets));
+  dolphinWakeTexture=prep(tl.load(ASSET.wakeTrail));
+}
+const dolphinFallbackSplashTexture=makeSplashTexture();
+function makeSplash(){
+  const group=new THREE.Group(); group.visible=false; group.renderOrder=118;
+  const foamTex=dolphinFoamTexture||dolphinFallbackSplashTexture;
+  const rippleTex=dolphinRippleTexture||dolphinFallbackSplashTexture;
+  const dropletTex=dolphinDropletTexture||dolphinFallbackSplashTexture;
+  const wakeTex=dolphinWakeTexture||dolphinFallbackSplashTexture;
+
+  // Water-surface expanding ripple / foam disc.
+  const rippleG=new THREE.PlaneBufferGeometry(0.34,0.34);
+  const rippleM=new THREE.MeshBasicMaterial({map:rippleTex,color:0xcff6ff,transparent:true,opacity:0.0,side:THREE.DoubleSide,depthWrite:false,blending:THREE.AdditiveBlending});
+  const ripple=new THREE.Mesh(rippleG,rippleM); ripple.renderOrder=118; ripple.position.z=0.002; group.add(ripple);
+
+  // Brighter foam burst at the impact point.
+  const foamG=new THREE.PlaneBufferGeometry(0.24,0.24);
+  const foamM=new THREE.MeshBasicMaterial({map:foamTex,color:0xffffff,transparent:true,opacity:0.0,side:THREE.DoubleSide,depthWrite:false,blending:THREE.AdditiveBlending});
+  const foam=new THREE.Mesh(foamG,foamM); foam.renderOrder=119; foam.position.z=0.006; group.add(foam);
+
+  // Vertical splash plume / droplets billboard.
+  const plumeG=new THREE.PlaneBufferGeometry(0.30,0.38);
+  const plumeM=new THREE.MeshBasicMaterial({map:dropletTex,color:0xffffff,transparent:true,opacity:0.0,side:THREE.DoubleSide,depthWrite:false,blending:THREE.AdditiveBlending});
+  const plume=new THREE.Mesh(plumeG,plumeM); plume.renderOrder=120; plume.position.z=0.13; plume.rotation.x=Math.PI/2; group.add(plume);
+
+  // Short wake streak that points along the dolphin travel direction.
+  const wakeG=new THREE.PlaneBufferGeometry(0.18,0.42);
+  const wakeM=new THREE.MeshBasicMaterial({map:wakeTex,color:0xdff9ff,transparent:true,opacity:0.0,side:THREE.DoubleSide,depthWrite:false,blending:THREE.AdditiveBlending});
+  const wake=new THREE.Mesh(wakeG,wakeM); wake.renderOrder=117; wake.position.y=-0.18; wake.position.z=0.004; group.add(wake);
+
+  group.userData={ripple,foam,plume,wake,age:0,duration:1.05,size:1};
+  scene.add(group); return group;
+}
+function makeDolphinWake(){
+  const group=new THREE.Group(); group.visible=false; group.renderOrder=116;
+  const wakeTex=dolphinWakeTexture||dolphinFallbackSplashTexture;
+  const wakeG=new THREE.PlaneBufferGeometry(0.18,0.46);
+  const wakeM=new THREE.MeshBasicMaterial({map:wakeTex,color:0xdff9ff,transparent:true,opacity:0.0,side:THREE.DoubleSide,depthWrite:false,blending:THREE.AdditiveBlending});
+  const wake=new THREE.Mesh(wakeG,wakeM); wake.renderOrder=116; group.add(wake);
+  group.userData={wake,age:0,duration:DOLPHIN_WAKE_DURATION,size:1}; scene.add(group); return group;
+}
+function orientVerticalBillboardOnWater(mesh,dir,fwd){
+  const up=dir.clone().normalize();
+  const forwardT=fwd.clone().addScaledVector(up,-fwd.dot(up));
+  if(forwardT.lengthSq()<0.0001) forwardT.crossVectors(up,new THREE.Vector3(0,1,0));
+  forwardT.normalize();
+  const side=new THREE.Vector3().crossVectors(up,forwardT).normalize();
+  const m=new THREE.Matrix4().makeBasis(side,up,forwardT);
+  mesh.quaternion.setFromRotationMatrix(m);
+}
+function orientOnSphere(obj,dir,fwd){
+  const up=dir.clone().normalize();
+  const forwardT=fwd.clone().addScaledVector(up,-fwd.dot(up));
+  if(forwardT.lengthSq()<0.0001) forwardT.crossVectors(up,new THREE.Vector3(0,1,0));
+  forwardT.normalize();
+  // Level dolphin against the local ocean tangent plane.
+  // X = right, Y = local globe normal/up, Z = travel direction.
+  // Using up x forward avoids the sideways/rolled look from a left-handed basis.
+  const side=new THREE.Vector3().crossVectors(up,forwardT).normalize();
+  const correctedForward=new THREE.Vector3().crossVectors(side,up).normalize();
+  const m=new THREE.Matrix4().makeBasis(side,up,correctedForward);
+  obj.quaternion.setFromRotationMatrix(m);
+}
+function orientSplashOnWater(obj,dir,fwd){
+  const up=dir.clone().normalize();
+  const forwardT=fwd.clone().addScaledVector(up,-fwd.dot(up));
+  if(forwardT.lengthSq()<0.0001) forwardT.crossVectors(up,new THREE.Vector3(0,1,0));
+  forwardT.normalize();
+  const side=new THREE.Vector3().crossVectors(forwardT,up).normalize();
+  const m=new THREE.Matrix4().makeBasis(side,forwardT,up);
+  obj.quaternion.setFromRotationMatrix(m);
+}
+
+function sanitizeDolphinJumpClip(clip){
+  // The dolphin's Jump animation has useful vertical leap motion, but also has baked root
+  // travel along the model's forward axis. That root-motion makes the dolphin slide/back up
+  // on the globe. Keep the Y/up keys and freeze the horizontal root keys at frame 0.
+  if(!clip) return clip;
+  const clean=clip.clone();
+  clean.tracks=clean.tracks.map(track=>{
+    if(/Dolphin_Root\.position$/i.test(track.name) || /Dolphin_Root\.translation$/i.test(track.name)){
+      const t=track.clone();
+      const v=t.values;
+      if(v && v.length>=3){
+        const baseX=v[0], baseZ=v[2];
+        for(let i=0;i<v.length;i+=3){
+          v[i]=baseX;       // no sideways drift
+          // v[i+1] is retained: this is the animated jump height/emergence
+          v[i+2]=baseZ;     // no forward/backward root-motion slide
+        }
+      }
+      return t;
+    }
+    return track;
+  });
+  clean.resetDuration();
+  return clean;
+}
+
+function createDolphinInstance(){
+  if(!dolphinTemplate) return null;
+  const root=new THREE.Group(); root.visible=false; root.userData.active=false;
+  const model=(THREE.SkeletonUtils&&THREE.SkeletonUtils.clone)?THREE.SkeletonUtils.clone(dolphinTemplate):dolphinTemplate.clone(true);
+  model.scale.setScalar(DOLPHIN_SCALE);
+  model.rotation.y=Math.PI;
+  model.traverse(o=>{if(o.isMesh){o.frustumCulled=false;o.castShadow=false;o.receiveShadow=false; const mats=Array.isArray(o.material)?o.material:[o.material]; mats.forEach(m=>{if(m){if('roughness' in m)m.roughness=.45; m.needsUpdate=true;}});}});
+  root.add(model); scene.add(root);
+  const mixer=new THREE.AnimationMixer(model);
+  let action=null;
+  if(dolphinJumpClip){action=mixer.clipAction(dolphinJumpClip); action.setLoop(THREE.LoopRepeat,Infinity); action.play();}
+  return {root,model,mixer,action,splashA:makeSplash(),splashB:makeSplash(),wake:makeDolphinWake(),age:0,delay:0,started:false,duration:DOLPHIN_JUMP_DURATION,startDir:new THREE.Vector3(),travelDir:new THREE.Vector3(),phase:Math.random()*10,arcScale:1,skimScale:1,travelScale:1,podId:0};
+}
+function loadDolphins(){
+  loadDolphinWaterVfxTextures();
+  loadDolphinWaterMasks();
+  status('Loading dolphin ambient wildlife...');
+  new THREE.GLTFLoader().load(ASSET.dolphin,gltf=>{
+    dolphinTemplate=gltf.scene;
+    dolphinTemplate.traverse(o=>{if(o.isMesh){o.frustumCulled=false;}});
+    dolphinJumpClip=sanitizeDolphinJumpClip((gltf.animations||[]).find(c=>/^jump$/i.test(c.name))||(gltf.animations||[]).find(c=>/jump/i.test(c.name))||(gltf.animations||[])[0]);
+    dolphinSwimClip=(gltf.animations||[]).find(c=>/swimforward/i.test(c.name));
+    for(let i=0;i<DOLPHIN_MAX_ACTIVE;i++){const d=createDolphinInstance(); if(d)dolphins.push(d);}
+    status('Dolphins ready: '+(dolphinJumpClip?dolphinJumpClip.name:'no jump clip'));
+  },undefined,e=>status('Dolphin load failed: '+(e.message||'')));
+}
+function randomOceanNearDragon(){
+  // HARD RULE: choose ONLY from the precomputed dolphin_spawn_mask samples, and ONLY
+  // from samples currently visible to the camera. This is the only dolphin spawning path.
+  if(!dolphinAllowedDirections.length) return null;
+  const visible=[];
+  for(let i=0;i<dolphinAllowedDirections.length;i++){
+    const d=dolphinAllowedDirections[i];
+    if(isDolphinSpawnVisible(d,0.08) && isDolphinSpawnMaskDirection(d)) visible.push(d);
+  }
+  if(!visible.length) return null;
+  // Try a few random visible samples, preferring points somewhat near the dragon view direction
+  // but never falling back outside the mask.
+  for(let tries=0;tries<80;tries++){
+    const d=visible[Math.floor(Math.random()*visible.length)].clone();
+    if(isDolphinSpawnMaskDirection(d)) return {dir:d};
+  }
+  return null;
+}
+function dolphinDirectionAt(d,p){
+  // Controlled small arc across the local ocean tangent plane.
+  // The dolphin GLB's visible forward axis is opposite the world travel basis after model correction,
+  // so the procedural arc must move along -travelDir. Otherwise the dolphin appears to jump backward.
+  const pc=clamp(p,0,1);
+  const travelProgress=pc; // start -> splashdown
+  const curved=d.startDir.clone().addScaledVector(d.travelDir,DOLPHIN_SURFACE_TRAVEL*(d.travelScale||1.0)*travelProgress).normalize();
+  return curved;
+}
+function dolphinWaterPosition(dir){
+  return dir.clone().multiplyScalar(earthR+DOLPHIN_SURFACE_OFFSET);
+}
+function dolphinSubmergedPosition(dir){
+  // Anchor the whole dolphin below the water/globe at idle/start/end, so it fully disappears.
+  return dir.clone().multiplyScalar(earthR-DOLPHIN_SUBMERGE_DEPTH);
+}
+function dolphinJumpRootPosition(d,dir,p){
+  // Keep start/end fully submerged, but skim close enough during the jump for dorsal fins to cut the water.
+  // The GLB Jump clip provides body motion; this adds a subtle readable arc in world space.
+  const pc=clamp(p,0,1);
+  const sinp=Math.sin(Math.PI*pc);
+  const skim=Math.pow(sinp,0.62);
+  // Sharper, less-flat dolphin leap: a stronger parabolic peak with minimal horizontal travel.
+  const arc=Math.pow(sinp,1.15);
+  // Start/end fully underwater; mid-jump rises clearly above the surface.
+  const r=earthR-DOLPHIN_SUBMERGE_DEPTH + DOLPHIN_SURFACE_SKIM_LIFT*(d.skimScale||1.0)*skim + DOLPHIN_EXTRA_ARC_LIFT*(d.arcScale||1.0)*arc;
+  return dir.clone().multiplyScalar(r);
+}
+function hideDolphinCompletely(d){
+  if(!d) return;
+  d.root.userData.active=false;
+  d.root.visible=false;
+  d.started=false;
+  d.age=0;
+  d.delay=0;
+  d.podId=0;
+  if(d.wake)d.wake.visible=false;
+  if(d.splashA)d.splashA.visible=false;
+  if(d.splashB)d.splashB.visible=false;
+}
+function dolphinEntireVisibleObjectInsideMask(d,dir){
+  // The visible model can extend beyond its root due to animation, model scale, and pod offsets.
+  // Enforce the same mask at several nearby surface samples around the dolphin footprint.
+  if(!isDolphinSpawnMaskDirection(dir)) return false;
+  const up=dir.clone().normalize();
+  const f=d.travelDir.clone().addScaledVector(up,-d.travelDir.dot(up));
+  if(f.lengthSq()<0.0001) f.crossVectors(up,new THREE.Vector3(0,1,0));
+  f.normalize();
+  const r=new THREE.Vector3().crossVectors(f,up).normalize();
+  const footprint=0.010; // safely larger than dolphin visual footprint + splash/wake center drift
+  const checks=[
+    dir,
+    up.clone().addScaledVector(f,footprint).normalize(),
+    up.clone().addScaledVector(f,-footprint).normalize(),
+    up.clone().addScaledVector(r,footprint).normalize(),
+    up.clone().addScaledVector(r,-footprint).normalize()
+  ];
+  for(const c of checks){ if(!isDolphinSpawnMaskDirection(c)) return false; }
+  return true;
+}
+function activateDolphinInPod(d,start,travel,delay,podId){
+  d.age=0;
+  d.delay=delay||0;
+  d.started=false;
+  d.duration=(dolphinJumpClip?dolphinJumpClip.duration:DOLPHIN_JUMP_DURATION)*(0.94+Math.random()*0.12);
+  d.arcScale=0.90+Math.random()*0.18;
+  d.skimScale=0.94+Math.random()*0.12;
+  d.travelScale=0.88+Math.random()*0.18;
+  d.phase=Math.random()*10;
+  d.podId=podId||0;
+  d.startDir.copy(start); d.travelDir.copy(travel); d.root.userData.active=true; d.root.visible=false;
+  d.root.position.copy(dolphinSubmergedPosition(start));
+  orientOnSphere(d.root,start,travel);
+  if(d.action){d.action.reset(); d.action.stop(); d.action.timeScale=0.88+Math.random()*0.24;}
+  d.splashA.visible=false; d.splashB.visible=false; if(d.wake)d.wake.visible=false;
+}
+function beginDolphinJump(d){
+  d.started=true; d.age=0; d.root.visible=true;
+  if(d.action){d.action.reset().play();}
+  triggerSplash(d.splashA,d.startDir,d.travelDir,1.0);
+}
+function activeDolphinPodCount(){
+  const ids=new Set();
+  for(const d of dolphins){
+    if(d.root.userData.active && d.podId) ids.add(d.podId);
+  }
+  return ids.size;
+}
+function spawnDolphinPod(){
+  if(activeDolphinPodCount()>=DOLPHIN_MAX_ACTIVE_PODS) return;
+  const podSize=DOLPHIN_POD_MIN+Math.floor(Math.random()*(DOLPHIN_POD_MAX-DOLPHIN_POD_MIN+1));
+  const free=dolphins.filter(x=>!x.root.userData.active).slice(0,podSize);
+  if(free.length<podSize || !dolphinMasksReady()) return;
+  const pick=randomOceanNearDragon();
+  if(!pick) return;
+  const podId=dolphinNextPodId++;
+  const base=pick.dir;
+  const localF=forward.clone().addScaledVector(base,-forward.dot(base));
+  if(localF.lengthSq()<0.001) localF.crossVectors(base,right);
+  localF.normalize();
+  const localR=new THREE.Vector3().crossVectors(localF,base).normalize();
+  const angle=(Math.random()-.5)*1.0;
+  const travel=localF.clone().multiplyScalar(Math.cos(angle)).add(localR.clone().multiplyScalar(Math.sin(angle))).normalize();
+  const spacing=0.012;
+  for(let i=0;i<podSize;i++){
+    // Each dolphin in the pod jumps independently, not in lockstep.
+    // Random 0-2s separation keeps groups natural while still reading as one pod.
+    const stagger=Math.random()*2.0;
+    const side=(i-(podSize-1)*0.5)*spacing + (Math.random()-.5)*0.006;
+    const ahead=(Math.random()-.5)*0.012;
+    const start=base.clone().addScaledVector(localR,side).addScaledVector(localF,ahead).normalize();
+    if(!isDolphinSpawnVisible(start,0.18)) continue;
+    if(!isDolphinSpawnMaskDirection(start)) continue;
+    if(!isOpenOceanJumpPath(start,travel)) continue;
+    const tempD={travelDir:travel};
+    if(!dolphinEntireVisibleObjectInsideMask(tempD,start)) continue;
+    const splashdown=start.clone().addScaledVector(travel,DOLPHIN_SURFACE_TRAVEL*(0.88+Math.random()*0.18)).normalize();
+    if(!isDolphinSpawnMaskDirection(splashdown)) continue;
+    if(!dolphinEntireVisibleObjectInsideMask(tempD,splashdown)) continue;
+    activateDolphinInPod(free[i],start,travel,stagger,podId);
+  }
+}
+function triggerSplash(splash,dir,fwd,size){
+  if(!splash) return;
+  splash.visible=true; splash.userData.age=0; splash.userData.size=size||1;
+  splash.position.copy(dolphinWaterPosition(dir)); orientSplashOnWater(splash,dir,fwd);
+  if(splash.userData.ripple){splash.userData.ripple.material.opacity=.48; splash.userData.ripple.scale.setScalar(0.62*(size||1));}
+  if(splash.userData.foam){splash.userData.foam.material.opacity=.82; splash.userData.foam.scale.setScalar(0.78*(size||1)); splash.userData.foam.rotation.z=Math.random()*Math.PI*2;}
+  if(splash.userData.plume){splash.userData.plume.material.opacity=.86; splash.userData.plume.scale.setScalar(0.78*(size||1)); splash.userData.plume.rotation.x=Math.PI/2; splash.userData.plume.rotation.z=0;}
+  if(splash.userData.wake){splash.userData.wake.material.opacity=.44; splash.userData.wake.scale.set(0.9*(size||1),1.05*(size||1),1);}
+}
+function updateSplash(splash,dt){
+  if(!splash||!splash.visible) return;
+  splash.userData.age=(splash.userData.age||0)+dt;
+  const p=clamp(splash.userData.age/(splash.userData.duration||1.05),0,1);
+  const size=splash.userData.size||1;
+  if(splash.userData.ripple){
+    splash.userData.ripple.scale.setScalar((0.62+p*2.4)*size);
+    splash.userData.ripple.material.opacity=Math.max(0,.48*(1-p));
+  }
+  if(splash.userData.foam){
+    splash.userData.foam.scale.setScalar((0.78+p*1.15)*size);
+    splash.userData.foam.material.opacity=Math.max(0,.82*(1-p));
+  }
+  if(splash.userData.plume){
+    splash.userData.plume.scale.setScalar((0.78+p*1.05)*size);
+    splash.userData.plume.position.z=0.13+p*0.17;
+    splash.userData.plume.material.opacity=Math.max(0,.86*(1-p));
+  }
+  if(splash.userData.wake){
+    splash.userData.wake.scale.set(0.9*(1+p*1.4)*size,1.05*(1+p*1.1)*size,1);
+    splash.userData.wake.material.opacity=Math.max(0,.44*(1-p));
+  }
+  if(p>=1) splash.visible=false;
+}
+function updateDolphinWake(wake,dir,fwd,dt,visibleStrength){
+  if(!wake) return;
+  const strength=clamp(visibleStrength||0,0,1);
+  if(strength<=0.01){wake.visible=false; return;}
+  wake.visible=true;
+  wake.userData.age=(wake.userData.age||0)+dt;
+  wake.position.copy(dolphinWaterPosition(dir));
+  orientSplashOnWater(wake,dir,fwd);
+  if(wake.userData.wake){
+    const pulse=0.88+0.12*Math.sin(wake.userData.age*8.0);
+    wake.userData.wake.material.opacity=0.34*strength;
+    wake.userData.wake.scale.set(0.85*pulse,1.45*pulse,1);
+  }
+}
+function updateDolphins(dt,t){
+  dolphinSpawnTimer-=dt;
+  if(dolphinSpawnTimer<=0 && dolphins.length){spawnDolphinPod(); dolphinSpawnTimer=DOLPHIN_MIN_SPAWN_DELAY+Math.random()*(DOLPHIN_MAX_SPAWN_DELAY-DOLPHIN_MIN_SPAWN_DELAY);}
+  for(const d of dolphins){
+    if(d.mixer)d.mixer.update(dt);
+    updateSplash(d.splashA,dt); updateSplash(d.splashB,dt);
+    if(!d.root.userData.active){ d.podId=0; if(d.wake)d.wake.visible=false; continue; }
+    if(!d.started){
+      d.delay-=dt;
+      if(d.delay<=0) beginDolphinJump(d);
+      else continue;
+    }
+    d.age+=dt; const p=clamp(d.age/d.duration,0,1);
+    const curDir=dolphinDirectionAt(d,p);
+    // Runtime hard safety: if any part of the dolphin footprint crosses outside
+    // the hand-painted territory mask, remove it immediately. No legacy/fallback path.
+    if(!dolphinEntireVisibleObjectInsideMask(d,curDir)){
+      hideDolphinCompletely(d);
+      continue;
+    }
+    d.root.position.copy(dolphinJumpRootPosition(d,curDir,p));
+    const surfaceWake=Math.pow(Math.sin(Math.PI*p),0.35);
+    updateDolphinWake(d.wake,curDir,d.travelDir,dt,surfaceWake);
+    orientOnSphere(d.root,curDir,d.travelDir);
+    // Nose pose follows the arc: slight nose-up on takeoff, clear head-down tilt on descent.
+    // Rotation is around the local side axis only, so it does not add roll/slant.
+    let pitchArc=0.0;
+    if(p<0.50){
+      pitchArc=0.24*(1.0-p/0.50);
+    }else{
+      const dp=clamp((p-0.50)/0.45,0,1);
+      pitchArc=-0.82*Math.sin(dp*Math.PI*0.5);
+      if(p>0.93) pitchArc*=1.0-clamp((p-0.93)/0.07,0,1)*0.35;
+    }
+    d.root.rotateX(pitchArc);
+    // Keep pods level: avoid procedural roll that made dolphins look slanted from above.
+    if(p>.82 && !d.splashB.visible){
+      const endDir=dolphinDirectionAt(d,1.0);
+      triggerSplash(d.splashB,endDir,d.travelDir,1.15);
+    }
+    if(p>=1){hideDolphinCompletely(d);}
+  }
+}
+
+function makeDragonFallback(){
+  dragonRoot=new THREE.Group(); scene.add(dragonRoot);
+  const mat=new THREE.MeshStandardMaterial({color:0x7a3118,roughness:.72});
+  const body=new THREE.Mesh(new THREE.ConeBufferGeometry(.10,.85,12),mat); body.rotation.x=Math.PI/2; body.castShadow=true; dragonRoot.add(body);
+  const wingMat=new THREE.MeshStandardMaterial({color:0x2c120c,roughness:.85,side:THREE.DoubleSide});
+  const wg=new THREE.BufferGeometry(); wg.setAttribute('position',new THREE.BufferAttribute(new Float32Array([0,0,0,-.55,0,.18,-.20,0,-.22,0,0,0,.55,0,.18,.20,0,-.22]),3)); wg.setIndex([0,1,2,3,4,5]); wg.computeVertexNormals(); const fallbackWings=new THREE.Mesh(wg,wingMat); fallbackWings.castShadow=true; dragonRoot.add(fallbackWings);
+}
+function loadDragon(){
+  status('Loading Dragon.glb...');
+  new THREE.GLTFLoader().load(ASSET.dragon,gltf=>{
+    dragonRoot.clear(); dragonVisual=gltf.scene;
+    const box=new THREE.Box3().setFromObject(dragonVisual), size=new THREE.Vector3(), ctr=new THREE.Vector3(); box.getSize(size); box.getCenter(ctr); dragonVisual.position.sub(ctr);
+    const maxDim=Math.max(size.x,size.y,size.z)||1; dragonVisual.scale.setScalar(0.78/maxDim);
+    dragonVisual.traverse(o=>{
+      if(o.isMesh){
+        o.frustumCulled=false;
+        o.castShadow=true;
+        o.receiveShadow=false;
+        const mats=Array.isArray(o.material)?o.material:[o.material];
+        mats.forEach(m=>{
+          if(!m) return;
+          m.side=THREE.DoubleSide;
+          if('roughness' in m) m.roughness=.74;
+          // Critical for animated shadows: older Three.js needs the depth material to know
+          // the mesh is skinned, otherwise the shadow can render from a static bind pose.
+          if(o.isSkinnedMesh) m.skinning=true;
+          m.needsUpdate=true;
+        });
+        if(o.isSkinnedMesh){
+          o.customDepthMaterial=new THREE.MeshDepthMaterial({depthPacking:THREE.RGBADepthPacking});
+          o.customDepthMaterial.skinning=true;
+          o.customDepthMaterial.side=THREE.DoubleSide;
+        }
+      }
+    });
+    dragonRoot.add(dragonVisual);
+    mouthBone=findMouthBone(dragonVisual);
+    makeFireBreath();
+    status('Mouth fire anchor: '+(mouthBone?mouthBone.name:'fallback local offset'));
+    if(gltf.animations&&gltf.animations.length){mixer=new THREE.AnimationMixer(dragonVisual); const fly=gltf.animations.find(c=>/fly/i.test(c.name))||gltf.animations[0]; flyAction=mixer.clipAction(fly); flyAction.play(); status('Dragon loaded: '+fly.name);} else status('Dragon loaded: no animation clips found.');
+  },undefined,e=>status('Dragon load failed. Use local server: python -m http.server. '+(e.message||'')));
+}
+function makeShadow(){
+  // Real dynamic shadow: the animated dragon mesh casts onto a transparent tangent receiver
+  // that hugs the Earth directly below the dragon. This uses Three.js shadow maps, so
+  // wing flaps from the GLB animation appear in the shadow instead of a fake still decal.
+  shadowTarget=new THREE.Object3D(); scene.add(shadowTarget);
+  shadowLight=new THREE.DirectionalLight(0xffffff,0.001); // tiny intensity; real shadow comes from ShadowMaterial receiver
+  shadowLight.castShadow=true;
+  shadowLight.target=shadowTarget;
+  shadowLight.shadow.mapSize.set(2048,2048);
+  shadowLight.shadow.camera.near=0.01;
+  shadowLight.shadow.camera.far=8.0;
+  shadowLight.shadow.camera.left=-2.2;
+  shadowLight.shadow.camera.right=2.2;
+  shadowLight.shadow.camera.top=2.2;
+  shadowLight.shadow.camera.bottom=-2.2;
+  shadowLight.shadow.bias=-0.00008;
+  shadowLight.shadow.normalBias=0.006;
+  shadowLight.shadow.autoUpdate=true;
+  scene.add(shadowLight);
+
+  const shMat=new THREE.ShadowMaterial({color:0x000000,opacity:0.22,transparent:true,depthWrite:false});
+  shadowPlane=new THREE.Mesh(new THREE.CircleBufferGeometry(2.25,72),shMat);
+  shadowPlane.receiveShadow=true;
+  shadowPlane.castShadow=false;
+  shadowPlane.renderOrder=90;
+  scene.add(shadowPlane);
+}
+function updateShadow(t){
+  if(!shadowPlane||!shadowLight||!shadowTarget) return;
+  // Surface point directly below dragon; slight offset prevents z-fighting with the globe.
+  const surface=radial.clone().multiplyScalar(earthR+0.145);
+  const basis=new THREE.Matrix4().makeBasis(right.clone(),forward.clone(),radial.clone());
+  shadowPlane.position.copy(surface);
+  shadowPlane.quaternion.setFromRotationMatrix(basis);
+
+  // Size/softness change with altitude, aircraft-style.
+  const size=clamp(1.05+altitude*.26,0.95,2.35);
+  shadowPlane.scale.setScalar(size);
+  shadowPlane.material.opacity=clamp(0.30-altitude*.045,0.075,0.24);
+
+  // Put a shadow-only directional light above the dragon along the local radial vector.
+  // This projects the dragon silhouette almost directly below it, which reads better
+  // for a flight game than a far-side sun-cast shadow on a curved planet.
+  shadowTarget.position.copy(surface);
+  shadowLight.position.copy(dragonRoot.position).add(radial.clone().multiplyScalar(3.2));
+  shadowLight.target.updateMatrixWorld(true);
+  shadowLight.updateMatrixWorld(true);
+
+  // Keep the shadow camera centered around the dragon/surface area.
+  const d=clamp(1.7+altitude*.45,1.6,4.2);
+  shadowLight.shadow.camera.left=-d;
+  shadowLight.shadow.camera.right=d;
+  shadowLight.shadow.camera.top=d;
+  shadowLight.shadow.camera.bottom=-d;
+  shadowLight.shadow.camera.updateProjectionMatrix();
+  shadowLight.shadow.camera.updateMatrixWorld(true);
+  shadowLight.shadow.needsUpdate=true;
+}
+function resetFlight(){radial.set(.20,.55,.81).normalize();forward.set(0,0,1);projectForward();altitude=.76;speed=targetSpeed=.032;camYaw=0;camPitch=.14;camDist=3.20;}
+function projectForward(){forward.addScaledVector(radial,-forward.dot(radial)).normalize();right.crossVectors(forward,radial).normalize();}
+function updateFlight(dt){
+  // Up now works like thrust/forward flight: hold ↑ to actively move forward and speed up.
+  // Without ↑ the dragon keeps only a very light glide so camera/orientation remain stable.
+  if(keys.up){targetSpeed+=dt*.115;flyAnimSpeed+=dt*1.15}else targetSpeed-=dt*.035;
+  if(keys.down){targetSpeed-=dt*.11;flyAnimSpeed-=dt*.95} targetSpeed=clamp(targetSpeed,keys.up?.030:.004,maxSpeed); flyAnimSpeed=clamp(flyAnimSpeed,.35,3.1); speed+=(targetSpeed-speed)*(1-Math.exp(-dt*4.2));
+  if(keys.w)altitude+=dt*.75; if(keys.s)altitude-=dt*.75; altitude=clamp(altitude,minAlt,maxAlt);
+  let turn=0;if(keys.left)turn+=1;if(keys.right)turn-=1;if(turn){forward.applyAxisAngle(radial,turn*dt*(.85+speed*6.0));projectForward();}
+  radial.addScaledVector(forward,speed*dt).normalize(); projectForward();
+  const pos=radial.clone().multiplyScalar(earthR+altitude); dragonRoot.position.copy(pos);
+  // Align model forward with travel direction. The GLB itself was previously 180° reversed,
+  // which made the dragon face the camera while moving away.
+  const m=new THREE.Matrix4().makeBasis(right.clone().negate(),radial,forward);
+  dragonRoot.quaternion.setFromRotationMatrix(m);
+  dragonRoot.rotateZ((keys.left?-.22:0)+(keys.right?.22:0));
+  if(flyAction) flyAction.timeScale=flyAnimSpeed;
+}
+function updateCamera(dt){
+  const behind=forward.clone().negate().applyAxisAngle(radial,camYaw).normalize(); const up=radial.clone();
+  const target=dragonRoot.position.clone().add(radial.clone().multiplyScalar(.20));
+  const desired=target.clone().add(behind.multiplyScalar(Math.cos(camPitch)*camDist)).add(up.multiplyScalar(Math.sin(camPitch)*camDist));
+  camera.position.lerp(desired,1-Math.exp(-dt*6.0)); camera.lookAt(target.clone().add(forward.clone().multiplyScalar(.85)));
+}
+function addEvents(){
+  addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight);});
+  addEventListener('keydown',e=>{if(e.code==='ArrowUp')keys.up=true;if(e.code==='ArrowDown')keys.down=true;if(e.code==='ArrowLeft')keys.left=true;if(e.code==='ArrowRight')keys.right=true;if(e.code==='KeyW')keys.w=true;if(e.code==='KeyS')keys.s=true;if(e.code==='KeyR')resetFlight();if(e.code==='KeyB')toggleDolphinSpawnBorders();if(e.code==='KeyC')toggleCollisionDebug();if(e.code==='Space'){keys.space=true;e.preventDefault();}});
+  addEventListener('keyup',e=>{if(e.code==='ArrowUp')keys.up=false;if(e.code==='ArrowDown')keys.down=false;if(e.code==='ArrowLeft')keys.left=false;if(e.code==='ArrowRight')keys.right=false;if(e.code==='KeyW')keys.w=false;if(e.code==='KeyS')keys.s=false;if(e.code==='Space'){keys.space=false;e.preventDefault();}});
+  canvas.addEventListener('mousedown',e=>{dragging=true;mx=e.clientX;my=e.clientY});addEventListener('mouseup',()=>dragging=false);addEventListener('mousemove',e=>{if(!dragging)return;const dx=e.clientX-mx,dy=e.clientY-my;mx=e.clientX;my=e.clientY;camYaw-=dx*.006;camPitch=clamp(camPitch+dy*.004,-.35,.85);});
+  canvas.addEventListener('wheel',e=>{e.preventDefault();camDist=clamp(camDist+e.deltaY*.0035,1.45,8.5);},{passive:false});
+}
+function animate(){
+  requestAnimationFrame(animate); const dt=Math.min(clock.getDelta(),.04), t=clock.elapsedTime;
+  if(earthMat){earthMat.uniforms.time.value=t;earthMat.uniforms.detailBoost.value=clamp(1.15-(altitude-.30)/1.45,0.0,1.15);} scene.traverse(o=>{if(o.userData&&o.userData.isWaterShell)o.material.uniforms.time.value=t});
+  if(mixer)mixer.update(dt); updateFlight(dt);
+  if(earthMat){earthMat.uniforms.dragonGroundDir.value.copy(radial); earthMat.uniforms.dragonShimmerStrength.value=clamp(0.70-altitude*.18,0.22,0.62); earthMat.uniforms.dragonShadowStrength.value=clamp(0.86-altitude*.22,0.28,0.74);}
+  updateShadow(t); updateFireBreath(t); updateDolphins(dt,t); updateClouds(t); updateCamera(dt);
+  document.getElementById('speedH').textContent='Speed '+(speed*1000).toFixed(0); document.getElementById('altH').textContent='Altitude '+altitude.toFixed(2);
+  renderer.render(scene,camera);
+}
+document.getElementById('go').onclick=()=>{document.getElementById('start').style.display='none';document.getElementById('hud').style.display='flex';document.getElementById('hint').style.display='block';init();};
+</script>
+</body>
+</html>
+
+<!-- cloud-bank tangent shadow fix -->

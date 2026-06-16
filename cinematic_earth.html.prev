@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>SebLague Style Dragon Earth v2</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#02040a;font-family:Arial,Helvetica,sans-serif;color:#dcefff;}
+  #c{display:block;width:100vw;height:100vh;}
+  #start{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:12px;background:radial-gradient(circle at 50% 38%,#10213d 0%,#02040a 62%,#000 100%);z-index:9;text-align:center}
+  #start h1{margin:0;font-size:42px;letter-spacing:2px;color:#ffd179;text-shadow:0 0 28px #f07c00,0 0 60px #123e8e}
+  #start p{margin:0 0 10px;color:#a9cce8;max-width:820px;line-height:1.45}
+  button{border:0;border-radius:999px;padding:13px 32px;background:linear-gradient(135deg,#c87512,#ff9b22);color:#fff;font-size:16px;font-weight:800;letter-spacing:1px;box-shadow:0 0 26px #ff9b2244;cursor:pointer}
+  #hud{position:fixed;display:none;left:14px;right:14px;top:12px;z-index:4;justify-content:space-between;pointer-events:none}
+  .pill{background:rgba(0,0,0,.55);border:1px solid rgba(255,200,112,.32);border-radius:8px;padding:8px 12px;color:#ffcf77;font:12px/1.25 monospace;backdrop-filter:blur(4px)}
+  #hint{position:fixed;display:none;bottom:14px;left:50%;transform:translateX(-50%);z-index:4;white-space:nowrap;color:#b9d7e7;background:rgba(0,0,0,.55);border:1px solid rgba(255,200,112,.25);border-radius:8px;padding:8px 14px;font-size:12px}
+  #status{position:fixed;display:none;left:12px;bottom:12px;max-width:75vw;z-index:5;background:rgba(0,0,0,.62);color:#9df49d;border-radius:6px;padding:6px 9px;font:12px monospace}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="start">
+  <h1>🐉 SEBLAGUE STYLE EARTH v2</h1>
+  <p>Clean rebuilt renderer: separate land/ocean/color/topography/coast/foam layers, flat oceans with bathymetry color, smoothed continents, visible softened elevations, and true Three.js mesh shadow: animated wing flaps cast onto a tangent receiver.</p>
+  <button id="go">TAKE FLIGHT</button>
+</div>
+<div id="hud"><div class="pill" id="speedH">Speed</div><div class="pill" id="altH">Altitude</div><div class="pill" id="locH">SebLague-style Earth</div></div>
+<div id="hint">↑ thrust forward · ↓ slow down · ←/→ steer · W/S altitude · Mouse drag camera · Wheel zoom · R reset</div>
+<div id="status"></div>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+<script>
+const ASSET = {
+  base:'./assets/base.jpg',
+  topo:'./assets/topo.jpg',
+  heightNormal:'./assets/height_normal_seb.png',
+  bathy:'./assets/bathy.jpg',
+  land:'./assets/landmask_smooth.png',
+  coast:'./assets/coastline_smooth.png',
+  shore:'./assets/shore_dst_smooth.png',
+  lakes:'./assets/Lakes.png',
+  waveA:'./assets/wave_a.png',
+  waveB:'./assets/wave_b.png',
+  waterNormal:'./assets/water_normal.png',
+  oceanColor:'./assets/ocean_color.png',
+  chloro:'./assets/chloro.png',
+  shallow:'./assets/shallow_blur.png',
+  dragon:'./assets/dragon.glb'
+};
+const canvas=document.getElementById('c'), statusEl=document.getElementById('status');
+let scene,camera,renderer,clock,earth,earthMat,dragonRoot,dragonVisual,mixer,flyAction,shadowGroup,shadowWingL,shadowWingR,shadowBody,shadowTail,shadowPlane,shadowLight,shadowTarget;
+const earthR=10;
+let radial=new THREE.Vector3(0.20,0.55,0.81).normalize();
+let forward=new THREE.Vector3(0,0,1), right=new THREE.Vector3();
+let altitude=0.76,minAlt=0.30,maxAlt=5.4,speed=0.032,targetSpeed=0.032,maxSpeed=0.115,flyAnimSpeed=1.0;
+let camYaw=0,camPitch=0.14,camDist=3.20,dragging=false,mx=0,my=0,keys={};
+function status(s){statusEl.style.display='block';statusEl.textContent=s;console.log(s)}
+function clamp(x,a,b){return Math.max(a,Math.min(b,x))}
+function tex(url,opts={}){const t=new THREE.TextureLoader().load(url,()=>{},undefined,()=>status('Texture load failed: '+url));t.anisotropy=opts.aniso||8;if(opts.srgb)t.encoding=THREE.sRGBEncoding;if(opts.repeat)t.wrapS=t.wrapT=THREE.RepeatWrapping;return t;}
+function init(){
+  scene=new THREE.Scene(); scene.fog=new THREE.FogExp2(0x02040a,0.0017);
+  camera=new THREE.PerspectiveCamera(58,innerWidth/innerHeight,0.03,1000);
+  renderer=new THREE.WebGLRenderer({canvas,antialias:true,powerPreference:'high-performance'});
+  renderer.setSize(innerWidth,innerHeight); renderer.setPixelRatio(Math.min(devicePixelRatio,1.75));
+  renderer.outputEncoding=THREE.sRGBEncoding; renderer.toneMapping=THREE.ACESFilmicToneMapping; renderer.toneMappingExposure=1.08;
+  renderer.shadowMap.enabled=true; renderer.shadowMap.type=THREE.PCFSoftShadowMap;
+  clock=new THREE.Clock();
+  scene.add(new THREE.HemisphereLight(0xcfe8ff,0x101820,1.45));
+  const sun=new THREE.DirectionalLight(0xffffff,2.2); sun.position.set(-18,14,12); scene.add(sun);
+  const fill=new THREE.DirectionalLight(0x92c9ff,0.45); fill.position.set(14,6,-12); scene.add(fill);
+  makeStars(); makeEarth(); makeDragonFallback(); makeShadow(); loadDragon(); resetFlight(); addEvents(); animate();
+}
+function makeStars(){
+  const g=new THREE.BufferGeometry(), n=1600, arr=new Float32Array(n*3);
+  for(let i=0;i<n;i++){let v=new THREE.Vector3(Math.random()*2-1,Math.random()*2-1,Math.random()*2-1).normalize().multiplyScalar(150+Math.random()*430); arr[i*3]=v.x;arr[i*3+1]=v.y;arr[i*3+2]=v.z;}
+  g.setAttribute('position',new THREE.BufferAttribute(arr,3));
+  scene.add(new THREE.Points(g,new THREE.PointsMaterial({color:0xffffff,size:.54,transparent:true,opacity:.75,sizeAttenuation:true})));
+}
+function makeEarth(){
+  const base=tex(ASSET.base,{srgb:true,aniso:12});
+  const topo=tex(ASSET.topo,{aniso:8});
+  const heightNormal=tex(ASSET.heightNormal,{aniso:8});
+  const bathy=tex(ASSET.bathy,{aniso:8});
+  const land=tex(ASSET.land,{aniso:8});
+  const coast=tex(ASSET.coast,{aniso:8});
+  const shore=tex(ASSET.shore,{aniso:8});
+  const lakes=tex(ASSET.lakes,{aniso:8});
+  const waveA=tex(ASSET.waveA,{repeat:true,aniso:6});
+  const waveB=tex(ASSET.waveB,{repeat:true,aniso:6});
+  const waterN=tex(ASSET.waterNormal,{repeat:true,aniso:6});
+  const oceanColor=tex(ASSET.oceanColor,{srgb:true,aniso:12});
+  const chloro=tex(ASSET.chloro,{aniso:8});
+  const shallow=tex(ASSET.shallow,{aniso:8});
+  earthMat=new THREE.ShaderMaterial({
+    uniforms:{time:{value:0},baseMap:{value:base},topoMap:{value:topo},heightNormalMap:{value:heightNormal},landMap:{value:land},coastMap:{value:coast},shoreMap:{value:shore},lakeMap:{value:lakes},waveA:{value:waveA},waterNormal:{value:waterN},oceanColorMap:{value:oceanColor},chloroMap:{value:chloro},shallowMap:{value:shallow},sunDir:{value:new THREE.Vector3(-0.62,0.55,0.45).normalize()},detailBoost:{value:1.0}},
+    vertexShader:`
+      varying vec2 vUv; varying vec3 vN; varying vec3 vW; varying float vH; varying float vLand;
+      uniform sampler2D topoMap; uniform sampler2D landMap; uniform sampler2D shoreMap;
+      float L(vec3 c){return dot(c,vec3(.299,.587,.114));}
+      float topoBlur(vec2 uv){
+        vec2 px=vec2(1.0/2048.0,1.0/1024.0);
+        float h=L(texture2D(topoMap,uv).rgb)*.38;
+        h+=L(texture2D(topoMap,uv+vec2(px.x,0.)).rgb)*.155;
+        h+=L(texture2D(topoMap,uv-vec2(px.x,0.)).rgb)*.155;
+        h+=L(texture2D(topoMap,uv+vec2(0.,px.y)).rgb)*.155;
+        h+=L(texture2D(topoMap,uv-vec2(0.,px.y)).rgb)*.155;
+        return h;
+      }
+      void main(){
+        vUv=uv;
+        float lm=texture2D(landMap,uv).r;
+        float land=smoothstep(.34,.50,lm);
+        float shore=texture2D(shoreMap,uv).r;
+        float coastFlatten=smoothstep(.08,.33,shore);
+        float h=topoBlur(uv);
+        // Remap NASA topo into visible but soft game-style relief.
+        h=smoothstep(.035,.50,h);
+        h=pow(h,1.12);
+        vH=h; vLand=land;
+        // Strong lowland / island uplift: small islands and coastal shelves were still too close
+        // to sea level, so lift the entire land base much more aggressively while preserving
+        // relative terrain through the topo term.
+        float minLandLift = 0.145;
+        float coastalBaseLift = mix(0.095, 0.012, coastFlatten);
+        float raisedRelief = minLandLift + coastalBaseLift + h * 0.360;
+        vec3 p = position + normal * land * raisedRelief;
+        vec4 wp=modelMatrix*vec4(p,1.0);
+        vW=wp.xyz; vN=normalize(normalMatrix*normal);
+        gl_Position=projectionMatrix*viewMatrix*wp;
+      }`,
+    fragmentShader:`
+      precision highp float;
+      varying vec2 vUv; varying vec3 vN; varying vec3 vW; varying float vH; varying float vLand;
+      uniform float time; uniform float detailBoost; uniform vec3 sunDir;
+      uniform sampler2D baseMap,topoMap,heightNormalMap,landMap,coastMap,shoreMap,lakeMap,waveA,waterNormal,oceanColorMap,chloroMap,shallowMap;
+      float L(vec3 c){return dot(c,vec3(.299,.587,.114));}
+      vec3 sat(vec3 c,float s){float l=L(c);return mix(vec3(l),c,s);} 
+      vec3 con(vec3 c,float k){return (c-.5)*k+.5;}
+      float rand(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
+      vec3 detailContrast(vec3 c){ c=sat(con(c,1.34),1.22); return c; }
+      vec3 triWeights(vec3 n){ vec3 w=pow(abs(n),vec3(4.0)); return w/(w.x+w.y+w.z+0.0001); }
+      void main(){
+        vec3 N=normalize(vN), V=normalize(cameraPosition-vW), S=normalize(sunDir);
+        // Precomputed height-derived normal map from Topo.jpg: gives SebLague-style slope shading
+        // without relying on sharp geometry displacement or expensive per-frame readback.
+        // SebLague-style spherical height normal. This texture is generated once from
+        // neighboring displaced sphere points: normal = cross(north-south, east-west).
+        // It is stored as RGB = normal * 0.5 + 0.5, A = height.
+        vec4 hPack = texture2D(heightNormalMap, vUv);
+        vec3 heightN = normalize(hPack.rgb * 2.0 - 1.0);
+        // Use the mathematically correct spherical terrain normal as the macro normal.
+        // Blend rather than replace so lowlands remain smooth and stylized.
+        N = normalize(mix(N, heightN, 0.74 * texture2D(landMap, vUv).r));
+        float ndl=max(dot(N,S),0.0);
+        float light=.76+.33*ndl+.10*pow(ndl,4.0);
+        float lm=texture2D(landMap,vUv).r;
+        float land=smoothstep(.34,.50,lm);
+        float ocean=1.0-land;
+        float shore=texture2D(shoreMap,vUv).r;
+        float coast=L(texture2D(coastMap,vUv).rgb);
+        
+        float topo=L(texture2D(topoMap,vUv).rgb);
+        float lat=abs(vUv.y-.5)*2.0;
+        vec3 satBase=sat(con(texture2D(baseMap,vUv).rgb,1.12),1.27);
+        float green=max(satBase.g-max(satBase.r,satBase.b),0.0);
+        float snowMask=max(smoothstep(.72,.92,L(satBase))*0.75, smoothstep(.66,.93,lat)*0.68);
+        snowMask=max(snowMask,smoothstep(.50,.78,vH)*smoothstep(.35,.62,lat));
+        snowMask*=land;
+        float mountain=smoothstep(.30,.78,vH)*land;
+        float desert=smoothstep(.05,.20,satBase.r-satBase.b)*smoothstep(.26,.62,satBase.r)*land*(1.0-snowMask);
+        float forest=smoothstep(.012,.13,green)*land*(1.0-snowMask*.8)*(1.0-desert*.55);
+        vec3 landCol=satBase;
+        landCol=mix(landCol,vec3(.13,.39,.16),forest*.45);
+        landCol=mix(landCol,vec3(.68,.50,.25),desert*.48);
+        landCol=mix(landCol,vec3(.40,.39,.32),mountain*.32*(1.0-snowMask));
+        landCol=mix(landCol,vec3(.90,.91,.86),snowMask*.72);
+        // PBR/triplanar biome detail disabled.
+        // The uploaded PBR atlases caused visible diagonal/grid artifacts on land at low altitude.
+        // Land now uses the high-quality Base/Topo maps plus macro height-normal lighting only.
+        float dBoost = detailBoost * land;
+        vec3 detailN = N;
+        float normalWeight = 0.0;
+        float biomeRoughMix = 0.62;
+        // Soft topo shading without sharp spikes.
+        float ridge=pow(clamp(vH,0.0,1.0),1.12);
+        float fineGrain=(rand(floor(vUv*vec2(2100.0,1050.0)))-.5)*.034*dBoost;
+        landCol*=.86+ridge*.38+fineGrain;
+        // SebLague-style ocean base upgraded with the supplied Ocean / Chloro / Shallow masks.
+        // Ocean.png provides global bathymetry colour; Chloro adds soft biological/coastal variation;
+        // the shallow mask is only a subtle tint, not a broad static shelf band.
+        vec3 deep=vec3(.010,.105,.34);
+        vec3 mid=vec3(.025,.34,.62);
+        vec3 oceanTex=texture2D(oceanColorMap,vUv).rgb;
+        oceanTex=sat(con(oceanTex,1.08),1.16);
+        float oceanLum=L(oceanTex);
+        vec3 proceduralOcean=mix(deep,mid,smoothstep(.05,.55,oceanLum));
+        vec3 water=mix(proceduralOcean,oceanTex,.68);
+        float shallow=L(texture2D(shallowMap,vUv).rgb);
+        float chl=L(texture2D(chloroMap,vUv).rgb);
+        // Keep shallow influence darker/turquoise and conservative so it does not become the old pale band.
+        float shallowWater=ocean*smoothstep(.18,.78,shallow)*(1.0-smoothstep(.72,.98,shallow));
+        water=mix(water, vec3(.018,.34,.56), shallowWater*.18);
+        water+=vec3(-.018,.050,.030) * smoothstep(.10,.72,chl) * ocean * .42;
+        water=mix(water, vec3(.006,.070,.22), ocean*(1.0-smoothstep(.10,.50,oceanLum))*.14);
+        vec2 w1=vUv*vec2(34.,17.)+vec2(time*.020,time*.006);
+        vec2 w2=vUv*vec2(92.,46.)+vec2(-time*.014,time*.018);
+        vec2 w3=vUv*vec2(128.,64.)+vec2(time*.008,-time*.015);
+        float wa=L(texture2D(waveA,w1).rgb), wb=L(texture2D(waveA,w2).rgb);
+        vec3 wn=texture2D(waterNormal,w3).rgb*2.0-1.0;
+        float wave=wa*.42+wb*.38+(wn.z*.5+.5)*.20;
+        vec3 H=normalize(S+V);
+        float spec=pow(max(dot(normalize(N+wn*.15*ocean),H),0.0),88.0)*ocean*(.35+.65*wave);
+        water+=vec3(.030,.085,.135)*(wave-.45);
+        water+=vec3(.68,.92,1.0)*spec*.75;
+        // Crisp shoreline waves generated from the coastline distance field.
+        // Tightened range: the surf is closer to shore and does not extend far offshore.
+        float dstFromShore = shore;
+        float innerFade = smoothstep(0.0012, 0.0032, dstFromShore);
+        float outerFade = 1.0 - smoothstep(0.0075, 0.0145, dstFromShore);
+        float shoreFalloff = innerFade * outerFade;
+        shoreFalloff *= shoreFalloff;
+        float shoreBand = ocean * shoreFalloff;
+
+        // Shoreline wave train: continuous everywhere.
+        // Use a repeating phase ramp instead of a global on/off sine threshold, so foam
+        // bands never disappear after a few waves. Local phase varies by position only.
+        float shoreScale = 260.0;      // spacing between crests; higher = closer bands
+        float scrollSpeed = 0.34;      // slow continuous movement
+
+        // Very low distortion: keeps the wave lines clean and avoids noisy overlap.
+        float shoreNoise = (wave - 0.5) * 0.000003 * shoreFalloff;
+        float distortedDst = max(0.0, dstFromShore + shoreNoise);
+
+        // Smooth spatial phase offset only. This is NOT a timing gate. Every coastline
+        // animates continuously, but different places start at a different wave phase.
+        float phaseA = sin(vUv.x * 31.7 + vUv.y * 19.3);
+        float phaseB = sin(vUv.x * 83.1 - vUv.y * 47.9);
+        float localPhase = (phaseA * 0.65 + phaseB * 0.35) * 0.38;
+
+        // Repeating triangular crest signal. Because it is based on fract(), there is
+        // always a sequence of waves in the shoreline band rather than a few waves then stop.
+        float wavePhase = distortedDst * shoreScale - time * scrollSpeed + localPhase;
+        float crest = 1.0 - abs(fract(wavePhase) - 0.5) * 2.0;
+
+        // Volumetric surf: wider/noisier body plus a bright core.
+        // Noise fattens the lines unevenly so they read as foam volume, not thin vectors.
+        float foamNoiseA = L(texture2D(waveA, vUv * vec2(62.0, 31.0) + vec2(time * 0.010, -time * 0.004)).rgb);
+        float foamNoiseB = L(texture2D(waveA, vUv * vec2(121.0, 58.0) + vec2(-time * 0.006, time * 0.009)).rgb);
+        float foamNoise = foamNoiseA * 0.65 + foamNoiseB * 0.35;
+        float noisyCrest = clamp(crest + (foamNoise - 0.5) * 0.18, 0.0, 1.0);
+        float foamBody = smoothstep(0.54, 0.90, noisyCrest);
+        float foamCore = smoothstep(0.78, 0.975, noisyCrest);
+        float foamWave = clamp(foamBody * 0.48 + foamCore * 0.74, 0.0, 1.0);
+
+        // Break up the foam edge while keeping continuous wave trains.
+        float patchA = L(texture2D(waveA, vUv * vec2(40.0, 20.0) + vec2(time * 0.006, 0.0)).rgb);
+        float surfBreakup = mix(0.88, 1.12, smoothstep(0.34, 0.92, patchA));
+        float foam = shoreBand * foamWave * surfBreakup;
+        vec3 foamWhite = vec3(1.0, 1.0, 1.0);
+        vec3 foamTint = vec3(0.68, 0.92, 1.0);
+        water += foamTint * foam * 0.18;
+        water=mix(water,foamWhite,foam*.72);
+        vec3 col=mix(water,landCol,land);
+
+        // Lakes-only inland water mask.  This replaces the old rivers_lakes overlay:
+        // it keeps recognizable inland lakes while removing long river veins.
+        float lakeMask = smoothstep(0.18, 0.72, texture2D(lakeMap, vUv).r) * land;
+        lakeMask *= 1.0 - smoothstep(0.020, 0.085, shore); // avoid painting lake color over ocean coasts
+        // Lakes use the same animated water-normal sample as the ocean, but at a softer strength.
+        // This keeps the shader stable while adding lake ripples/specular highlights.
+        vec3 lakeN = normalize(N + wn * 0.16);
+        float lakeRipple = clamp((wn.z * 0.5 + 0.5) * 0.55 + wave * 0.45, 0.0, 1.0);
+        vec3 lakeBase = mix(vec3(.007,.095,.245), vec3(.018,.240,.410), lakeRipple*.50+.28);
+        float lakeLight = mix(0.90, 1.08, max(dot(lakeN, S), 0.0));
+        float lakeSpec = pow(max(dot(lakeN, H), 0.0), 96.0) * lakeMask * (.25 + .75*lakeRipple);
+        vec3 lakeCol = lakeBase * lakeLight + vec3(.55,.85,1.0) * lakeSpec * .46;
+        col = mix(col, lakeCol, lakeMask*.96);
+
+        // Thin smooth ink coastline for readability without the broad black shore band.
+        // Coastline ink should not darken/tint the land side of the coast.
+        // Keep the readability line only on ocean pixels so the dark green/grey land halo disappears.
+        float ink=smoothstep(.72,.96,coast) * (1.0-smoothstep(.045,.125,shore)) * ocean;
+        col=mix(col,vec3(.006,.011,.012),ink*.26);
+        col=mix(col,vec3(1.0),foam*.06);
+
+        // Rivers removed; Lakes.png is integrated as the only inland-water overlay.
+        col*=mix(light, .92 + .16*ndl, land);
+        col=sat(con(col,1.08),1.10);
+        col=pow(max(col,0.0),vec3(.92));
+        gl_FragColor=vec4(col,1.0);
+      }`
+  });
+  earth=new THREE.Mesh(new THREE.SphereBufferGeometry(earthR,320,160),earthMat);
+  scene.add(earth);
+  // A very light specular water shell to make the scrolling ocean normals readable.
+  const shellMat=new THREE.ShaderMaterial({transparent:true,depthWrite:false,uniforms:{time:{value:0},landMap:{value:land},shoreMap:{value:shore},lakeMap:{value:lakes},waveA:{value:waveA}},vertexShader:`varying vec2 vUv;void main(){vUv=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}`,fragmentShader:`precision highp float;varying vec2 vUv;uniform float time;uniform sampler2D landMap,shoreMap,lakeMap,waveA;float L(vec3 c){return dot(c,vec3(.299,.587,.114));}void main(){float land=smoothstep(.34,.50,texture2D(landMap,vUv).r);float ocean=1.0-land;float lake=smoothstep(.18,.72,texture2D(lakeMap,vUv).r)*land;float sh=texture2D(shoreMap,vUv).r;lake*=1.0-smoothstep(.020,.085,sh);float w=L(texture2D(waveA,vUv*50.0+vec2(time*.02,0.)).rgb)*.5+L(texture2D(waveA,vUv*88.0+vec2(0.,time*.017)).rgb)*.5;float oceanA=ocean*(.006+.020*smoothstep(.10,.70,sh))*smoothstep(.62,.92,w);float lakeA=lake*(.010+.030*smoothstep(.55,.92,w));gl_FragColor=vec4(.62,.92,1.0,oceanA+lakeA);}`});
+  const shell=new THREE.Mesh(new THREE.SphereBufferGeometry(earthR+.018,256,128),shellMat);
+  shell.userData.isWaterShell=true; scene.add(shell);
+}
+function makeDragonFallback(){
+  dragonRoot=new THREE.Group(); scene.add(dragonRoot);
+  const mat=new THREE.MeshStandardMaterial({color:0x7a3118,roughness:.72});
+  const body=new THREE.Mesh(new THREE.ConeBufferGeometry(.10,.85,12),mat); body.rotation.x=Math.PI/2; body.castShadow=true; dragonRoot.add(body);
+  const wingMat=new THREE.MeshStandardMaterial({color:0x2c120c,roughness:.85,side:THREE.DoubleSide});
+  const wg=new THREE.BufferGeometry(); wg.setAttribute('position',new THREE.BufferAttribute(new Float32Array([0,0,0,-.55,0,.18,-.20,0,-.22,0,0,0,.55,0,.18,.20,0,-.22]),3)); wg.setIndex([0,1,2,3,4,5]); wg.computeVertexNormals(); const fallbackWings=new THREE.Mesh(wg,wingMat); fallbackWings.castShadow=true; dragonRoot.add(fallbackWings);
+}
+function loadDragon(){
+  status('Loading Dragon.glb...');
+  new THREE.GLTFLoader().load(ASSET.dragon,gltf=>{
+    dragonRoot.clear(); dragonVisual=gltf.scene;
+    const box=new THREE.Box3().setFromObject(dragonVisual), size=new THREE.Vector3(), ctr=new THREE.Vector3(); box.getSize(size); box.getCenter(ctr); dragonVisual.position.sub(ctr);
+    const maxDim=Math.max(size.x,size.y,size.z)||1; dragonVisual.scale.setScalar(0.78/maxDim);
+    dragonVisual.traverse(o=>{
+      if(o.isMesh){
+        o.frustumCulled=false;
+        o.castShadow=true;
+        o.receiveShadow=false;
+        const mats=Array.isArray(o.material)?o.material:[o.material];
+        mats.forEach(m=>{
+          if(!m) return;
+          m.side=THREE.DoubleSide;
+          if('roughness' in m) m.roughness=.74;
+          // Critical for animated shadows: older Three.js needs the depth material to know
+          // the mesh is skinned, otherwise the shadow can render from a static bind pose.
+          if(o.isSkinnedMesh) m.skinning=true;
+          m.needsUpdate=true;
+        });
+        if(o.isSkinnedMesh){
+          o.customDepthMaterial=new THREE.MeshDepthMaterial({depthPacking:THREE.RGBADepthPacking});
+          o.customDepthMaterial.skinning=true;
+          o.customDepthMaterial.side=THREE.DoubleSide;
+        }
+      }
+    });
+    dragonRoot.add(dragonVisual);
+    if(gltf.animations&&gltf.animations.length){mixer=new THREE.AnimationMixer(dragonVisual); const fly=gltf.animations.find(c=>/fly/i.test(c.name))||gltf.animations[0]; flyAction=mixer.clipAction(fly); flyAction.play(); status('Dragon loaded: '+fly.name);} else status('Dragon loaded: no animation clips found.');
+  },undefined,e=>status('Dragon load failed. Use local server: python -m http.server. '+(e.message||'')));
+}
+function makeShadow(){
+  // Real dynamic shadow: the animated dragon mesh casts onto a transparent tangent receiver
+  // that hugs the Earth directly below the dragon. This uses Three.js shadow maps, so
+  // wing flaps from the GLB animation appear in the shadow instead of a fake still decal.
+  shadowTarget=new THREE.Object3D(); scene.add(shadowTarget);
+  shadowLight=new THREE.DirectionalLight(0xffffff,0.001); // tiny intensity; real shadow comes from ShadowMaterial receiver
+  shadowLight.castShadow=true;
+  shadowLight.target=shadowTarget;
+  shadowLight.shadow.mapSize.set(2048,2048);
+  shadowLight.shadow.camera.near=0.01;
+  shadowLight.shadow.camera.far=8.0;
+  shadowLight.shadow.camera.left=-2.2;
+  shadowLight.shadow.camera.right=2.2;
+  shadowLight.shadow.camera.top=2.2;
+  shadowLight.shadow.camera.bottom=-2.2;
+  shadowLight.shadow.bias=-0.00008;
+  shadowLight.shadow.normalBias=0.006;
+  shadowLight.shadow.autoUpdate=true;
+  scene.add(shadowLight);
+
+  const shMat=new THREE.ShadowMaterial({color:0x000000,opacity:0.22,transparent:true,depthWrite:false});
+  shadowPlane=new THREE.Mesh(new THREE.CircleBufferGeometry(2.25,72),shMat);
+  shadowPlane.receiveShadow=true;
+  shadowPlane.castShadow=false;
+  shadowPlane.renderOrder=50;
+  scene.add(shadowPlane);
+}
+function updateShadow(t){
+  if(!shadowPlane||!shadowLight||!shadowTarget) return;
+  // Surface point directly below dragon; slight offset prevents z-fighting with the globe.
+  const surface=radial.clone().multiplyScalar(earthR+0.065);
+  const basis=new THREE.Matrix4().makeBasis(right.clone(),forward.clone(),radial.clone());
+  shadowPlane.position.copy(surface);
+  shadowPlane.quaternion.setFromRotationMatrix(basis);
+
+  // Size/softness change with altitude, aircraft-style.
+  const size=clamp(1.05+altitude*.26,0.95,2.35);
+  shadowPlane.scale.setScalar(size);
+  shadowPlane.material.opacity=clamp(0.30-altitude*.045,0.075,0.24);
+
+  // Put a shadow-only directional light above the dragon along the local radial vector.
+  // This projects the dragon silhouette almost directly below it, which reads better
+  // for a flight game than a far-side sun-cast shadow on a curved planet.
+  shadowTarget.position.copy(surface);
+  shadowLight.position.copy(dragonRoot.position).add(radial.clone().multiplyScalar(3.2));
+  shadowLight.target.updateMatrixWorld(true);
+  shadowLight.updateMatrixWorld(true);
+
+  // Keep the shadow camera centered around the dragon/surface area.
+  const d=clamp(1.7+altitude*.45,1.6,4.2);
+  shadowLight.shadow.camera.left=-d;
+  shadowLight.shadow.camera.right=d;
+  shadowLight.shadow.camera.top=d;
+  shadowLight.shadow.camera.bottom=-d;
+  shadowLight.shadow.camera.updateProjectionMatrix();
+  shadowLight.shadow.camera.updateMatrixWorld(true);
+  shadowLight.shadow.needsUpdate=true;
+}
+function resetFlight(){radial.set(.20,.55,.81).normalize();forward.set(0,0,1);projectForward();altitude=.76;speed=targetSpeed=.032;camYaw=0;camPitch=.14;camDist=3.20;}
+function projectForward(){forward.addScaledVector(radial,-forward.dot(radial)).normalize();right.crossVectors(forward,radial).normalize();}
+function updateFlight(dt){
+  // Up now works like thrust/forward flight: hold ↑ to actively move forward and speed up.
+  // Without ↑ the dragon keeps only a very light glide so camera/orientation remain stable.
+  if(keys.up){targetSpeed+=dt*.115;flyAnimSpeed+=dt*1.15}else targetSpeed-=dt*.035;
+  if(keys.down){targetSpeed-=dt*.11;flyAnimSpeed-=dt*.95} targetSpeed=clamp(targetSpeed,keys.up?.030:.004,maxSpeed); flyAnimSpeed=clamp(flyAnimSpeed,.35,3.1); speed+=(targetSpeed-speed)*(1-Math.exp(-dt*4.2));
+  if(keys.w)altitude+=dt*.75; if(keys.s)altitude-=dt*.75; altitude=clamp(altitude,minAlt,maxAlt);
+  let turn=0;if(keys.left)turn+=1;if(keys.right)turn-=1;if(turn){forward.applyAxisAngle(radial,turn*dt*(.85+speed*6.0));projectForward();}
+  radial.addScaledVector(forward,speed*dt).normalize(); projectForward();
+  const pos=radial.clone().multiplyScalar(earthR+altitude); dragonRoot.position.copy(pos);
+  // Align model forward with travel direction. The GLB itself was previously 180° reversed,
+  // which made the dragon face the camera while moving away.
+  const m=new THREE.Matrix4().makeBasis(right.clone().negate(),radial,forward);
+  dragonRoot.quaternion.setFromRotationMatrix(m);
+  dragonRoot.rotateZ((keys.left?-.22:0)+(keys.right?.22:0));
+  if(flyAction) flyAction.timeScale=flyAnimSpeed;
+}
+function updateCamera(dt){
+  const behind=forward.clone().negate().applyAxisAngle(radial,camYaw).normalize(); const up=radial.clone();
+  const target=dragonRoot.position.clone().add(radial.clone().multiplyScalar(.20));
+  const desired=target.clone().add(behind.multiplyScalar(Math.cos(camPitch)*camDist)).add(up.multiplyScalar(Math.sin(camPitch)*camDist));
+  camera.position.lerp(desired,1-Math.exp(-dt*6.0)); camera.lookAt(target.clone().add(forward.clone().multiplyScalar(.85)));
+}
+function addEvents(){
+  addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight);});
+  addEventListener('keydown',e=>{if(e.code==='ArrowUp')keys.up=true;if(e.code==='ArrowDown')keys.down=true;if(e.code==='ArrowLeft')keys.left=true;if(e.code==='ArrowRight')keys.right=true;if(e.code==='KeyW')keys.w=true;if(e.code==='KeyS')keys.s=true;if(e.code==='KeyR')resetFlight();});
+  addEventListener('keyup',e=>{if(e.code==='ArrowUp')keys.up=false;if(e.code==='ArrowDown')keys.down=false;if(e.code==='ArrowLeft')keys.left=false;if(e.code==='ArrowRight')keys.right=false;if(e.code==='KeyW')keys.w=false;if(e.code==='KeyS')keys.s=false;});
+  canvas.addEventListener('mousedown',e=>{dragging=true;mx=e.clientX;my=e.clientY});addEventListener('mouseup',()=>dragging=false);addEventListener('mousemove',e=>{if(!dragging)return;const dx=e.clientX-mx,dy=e.clientY-my;mx=e.clientX;my=e.clientY;camYaw-=dx*.006;camPitch=clamp(camPitch+dy*.004,-.35,.85);});
+  canvas.addEventListener('wheel',e=>{e.preventDefault();camDist=clamp(camDist+e.deltaY*.0035,1.45,8.5);},{passive:false});
+}
+function animate(){
+  requestAnimationFrame(animate); const dt=Math.min(clock.getDelta(),.04), t=clock.elapsedTime;
+  if(earthMat){earthMat.uniforms.time.value=t;earthMat.uniforms.detailBoost.value=clamp(1.15-(altitude-.30)/1.45,0.0,1.15);} scene.traverse(o=>{if(o.userData&&o.userData.isWaterShell)o.material.uniforms.time.value=t});
+  if(mixer)mixer.update(dt); updateFlight(dt); updateShadow(t); updateCamera(dt);
+  document.getElementById('speedH').textContent='Speed '+(speed*1000).toFixed(0); document.getElementById('altH').textContent='Altitude '+altitude.toFixed(2);
+  renderer.render(scene,camera);
+}
+document.getElementById('go').onclick=()=>{document.getElementById('start').style.display='none';document.getElementById('hud').style.display='flex';document.getElementById('hint').style.display='block';init();};
+</script>
+</body>
+</html>
