@@ -129,7 +129,15 @@ const _fireWorldPos=new THREE.Vector3(), _fireWorldQuat=new THREE.Quaternion(), 
 // Reused per-frame scratch arrays for getDragonCapsuleSpheres() — avoids allocating
 // 14 new {center,radius,part} objects every frame for both fire-damage checks.
 const _playerCapsuleScratch=[], _enemyCapsuleScratch=[];
-// Dragon mouth-fire anchor. The rig has a dedicated bone named fireBreath.28.
+// Dragon mouth-fire anchor. The rig has a dedicated bone named fireBreath.28 in the
+// raw glTF file. IMPORTANT: GLTFLoader runs every node name through
+// PropertyBinding.sanitizeNodeName(), which strips any character outside
+// [A-Za-z0-9_-] — including periods — before assigning it to the live Object3D's
+// .name. So the bone is "fireBreath.28" in dragon.glb's JSON but "fireBreath28" at
+// runtime; getObjectByName() must use the stripped form or it silently returns
+// null (this exact mismatch caused DRAGON_CAPSULE/WING_CAPSULE to find 0/14 and
+// 0/6 bones the first time those were added — always strip dots from any bone
+// name copied from raw glTF JSON before using it here).
 // Fine tune the flame origin here after attaching to that bone.
 // In this bone's local space: X/Y/Z are small offsets around the mouth.
 // Start with 0s; use increments like 0.01 or 0.02 for tiny adjustments.
@@ -267,6 +275,15 @@ const FIRE_CONE_ANGLE = Math.atan(FIRE_CONE_RAD / FIRE_CONE_LEN); // radians hal
 // units, anchored to spine_01 since it's the torso side of that joint), then
 // re-expressed as a LOCAL offset from that bone so it rotates correctly with the
 // bone during animation, exactly like WING_CAPSULE's offsets.
+//
+// BONE NAME GOTCHA: the `bone` strings below have had their dots stripped
+// (e.g. "tail_30.212" in the raw glTF JSON becomes "tail_30212" at runtime),
+// because GLTFLoader sanitizes every node name via PropertyBinding.sanitizeNodeName(),
+// which removes any character outside [A-Za-z0-9_-]. Copying a bone name straight
+// from glTF JSON without stripping dots first will make getObjectByName() silently
+// return null for every entry — this is exactly what happened the first time this
+// table was built, and looked identical to a live-tracking bug (all spheres
+// collapsing to dragonRoot.position) until checked against console output.
 const DRAGON_CAPSULE = [
   // tail, ordered tip → base
   { part:'tail', bone:'tail_30212', offset:new THREE.Vector3(-0.0000,-0.0005,-0.0000), r:0.0198 },
@@ -2709,29 +2726,6 @@ function loadDragon(){
     playerCapsuleBones = findCapsuleBones(dragonVisual);
     const playerCapsuleFound = playerCapsuleBones.filter(s=>s.boneRef).length;
     status('Capsule hit-spheres: '+playerCapsuleFound+'/'+DRAGON_CAPSULE.length+' bones found');
-    // TEMP DIAGNOSTIC: log each capsule bone's name/found-status and, once live,
-    // its actual computed world position, so we can see directly in devtools
-    // console whether bones resolved correctly and whether positions spread out
-    // along the body or collapse together. Remove once the collapsed-sphere issue
-    // is resolved.
-    console.log('[capsule-debug] bone lookup results:');
-    playerCapsuleBones.forEach((s,i)=>{
-      console.log('  ['+i+'] part='+s.part+' bone="'+s.bone+'" found='+(!!s.boneRef));
-    });
-    setTimeout(()=>{
-      if(!playerCapsuleBones) return;
-      console.log('[capsule-debug] live world positions 2s after load:');
-      const diag = getDragonCapsuleSpheres(playerCapsuleBones, dragonRoot, []);
-      diag.forEach((sp,i)=>{
-        console.log('  ['+i+'] part='+sp.part+' center=('+sp.center.x.toFixed(4)+','+sp.center.y.toFixed(4)+','+sp.center.z.toFixed(4)+') r='+sp.radius);
-      });
-      console.log('[capsule-debug] dragonRoot.position=('+dragonRoot.position.x.toFixed(4)+','+dragonRoot.position.y.toFixed(4)+','+dragonRoot.position.z.toFixed(4)+')');
-      // Final cross-check: list real runtime bone names matching our expected
-      // prefixes, to confirm the dot-stripped names we now look up actually exist.
-      const relevant = [];
-      dragonVisual.traverse(o=>{ if(o.isBone && /^(tail_|spine_|neck_|l_forearm|r_forearm|l_wingFlap|r_wingFlap)/.test(o.name)) relevant.push(o.name); });
-      console.log('[capsule-debug] actual runtime bone names ('+relevant.length+'):', relevant);
-    }, 2000);
     if(!neckBone){
       // Debug: list all bone names containing common keywords so we can identify the right one
       const allBoneNames = [];
