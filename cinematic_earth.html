@@ -27,9 +27,17 @@
   <p>Clean rebuilt renderer: separate land/ocean/color/topography/coast/foam layers, flat oceans with bathymetry color, smoothed continents, visible softened elevations, and true Three.js mesh shadow: animated wing flaps cast onto a tangent receiver.</p>
   <button id="go">TAKE FLIGHT</button>
 </div>
-<div id="hud"><div class="pill" id="speedH">Speed</div><div class="pill" id="altH">Altitude</div><div class="pill" id="cloudH">☁ Clear</div><div class="pill" id="weatherH" style="display:none">🌧</div><div class="pill" id="locH">SebLague-style Earth</div></div>
+<div id="hud"><div class="pill" id="speedH">Speed</div><div class="pill" id="altH">Altitude</div><div class="pill" id="cloudH">☁ Clear</div><div class="pill" id="weatherH" style="display:none">🌧</div><div class="pill" id="snowH" style="display:none">❄</div><div class="pill" id="locH">SebLague-style Earth</div></div>
 <div id="cloudFog"></div>
 <div id="lightningFlash"></div>
+<!-- Floating bars rendered in CSS above each dragon via updatePlayerStats positioning -->
+<canvas id="statCanvas" style="position:fixed;inset:0;pointer-events:none;z-index:5;width:100%;height:100%"></canvas>
+<!-- Keep hidden fill divs for JS logic — not displayed -->
+<div id="hpFill"   style="display:none"></div>
+<div id="fireFill" style="display:none"></div>
+<div id="hpVal"    style="display:none"></div>
+<div id="fireVal"  style="display:none"></div>
+<div id="enemyIndicator" style="position:fixed;top:56px;left:14px;z-index:4;font:11px monospace;color:#f88;display:none">🔴 ENEMY</div>
 <div id="hint">↑ thrust · ↓ slow · ←/→ steer · W/S altitude · SPACE fire · T camera · B dolphin borders · C clouds · V debug · Mouse drag rotate · Wheel zoom · R reset</div>
 <div id="status"></div>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
@@ -71,6 +79,11 @@ const ASSET = {
 const canvas=document.getElementById('c'), statusEl=document.getElementById('status');
 let scene,camera,renderer,clock,earth,earthMat,dragonRoot,dragonVisual,mixer,flyAction,shadowGroup,shadowWingL,shadowWingR,shadowBody,shadowTail,shadowPlane,shadowLight,shadowTarget;
 let fireBreath=null, fireMats=[], fireTopPlane=null, fireGlow=null, mouthBone=null, fireActive=false;
+// Cached wing bone lookups (found once at model load, see findWingBones) and the
+// reusable scratch arrays their live world-space spheres get written into each frame.
+let playerWingBones=null, enemyWingBones=null;
+let playerCapsuleBones=null, enemyCapsuleBones=null;
+const _playerWingScratch=[], _enemyWingScratch=[];
 let dolphinTemplate=null, dolphinJumpClip=null, dolphinSwimClip=null, dolphinSpawnCanvas=null, dolphinSpawnCtx=null, dolphinSpawnTimer=2.2;
 let dolphinAllowedDirections=[];
 let dolphinFoamTexture=null, dolphinRippleTexture=null, dolphinDropletTexture=null, dolphinWakeTexture=null;
@@ -106,16 +119,21 @@ const _weatherHudEl = document.getElementById('weatherH');
 const STORM_COUNT_MIN = 2;
 const STORM_COUNT_MAX = 6;
 let _stormBanks = new Set();       // currently active storm bank indices
+let _snowBanks  = new Set();       // cloud banks in polar regions — snow clouds
 let _stormReshuffleTimer = 0;
 const STORM_RESHUFFLE_INTERVAL = 45; // seconds between storm pattern changes
+// Polar snow banks — randomly reshuffled like storm banks
 let dolphinNextPodId=1;
 const dolphins=[];
 const _fireWorldPos=new THREE.Vector3(), _fireWorldQuat=new THREE.Quaternion(), _fireLocalOffset=new THREE.Vector3(), _fireLocalRotQuat=new THREE.Quaternion();
+// Reused per-frame scratch arrays for getDragonCapsuleSpheres() — avoids allocating
+// 14 new {center,radius,part} objects every frame for both fire-damage checks.
+const _playerCapsuleScratch=[], _enemyCapsuleScratch=[];
 // Dragon mouth-fire anchor. The rig has a dedicated bone named fireBreath.28.
 // Fine tune the flame origin here after attaching to that bone.
 // In this bone's local space: X/Y/Z are small offsets around the mouth.
 // Start with 0s; use increments like 0.01 or 0.02 for tiny adjustments.
-const FIRE_BONE_NAME='fireBreath.28';
+const FIRE_BONE_NAME='fireBreath28';
 const FIRE_BONE_LOCAL_OFFSET=new THREE.Vector3(0.00,0.00,-0.06);
 const FIRE_BONE_LOCAL_ROTATION=new THREE.Euler(Math.PI/2,0,0);
 _fireLocalRotQuat.setFromEuler(FIRE_BONE_LOCAL_ROTATION);
@@ -171,9 +189,249 @@ const earthR=10;
 let radial=new THREE.Vector3(0.20,0.55,0.81).normalize();
 let forward=new THREE.Vector3(0,0,1), right=new THREE.Vector3();
 let altitude=0.76,minAlt=0.30,maxAlt=5.4,speed=0.032,targetSpeed=0.032,maxSpeed=0.115,flyAnimSpeed=1.0;
+// ── Player stats ──────────────────────────────────────────────────────
+let playerHP    = 100;   // 0–100
+let enemyHP     = 100;   // 0–100 — enemy health
+let playerFire  = 100;   // 0–100, fire meter
+const FIRE_DRAIN_RATE   = 40;   // per second while firing
+const FIRE_REFILL_RATE  = 20;   // per second when not firing
+const FIRE_REFILL_DELAY = 5.0;  // seconds after last fire before refill starts
+let   fireLastUsed      = -999; // clock.elapsedTime when space last pressed
+
+// ── Enemy dragon state ─────────────────────────────────────────────────
+let enemyRoot    = null;   // THREE.Group — enemy position/orientation
+let enemyVisual  = null;   // loaded GLB scene (same model)
+let enemyMixer   = null;
+let enemyAction  = null;
+let enemyFire    = null;   // fire breath group (same as player)
+let enemyFireMats= [];
+let enemyMouthBone = null;
+let enemyFireActive= false;
+let enemyFireWorldPos = new THREE.Vector3();
+let enemyFireWorldQuat= new THREE.Quaternion();
+
+// Enemy flight state (mirrors player variables)
+let eRadial  = new THREE.Vector3(-0.20, 0.55, -0.81).normalize();
+let eForward = new THREE.Vector3(0,0,1);
+let eRight   = new THREE.Vector3();
+let eAltitude= 0.76;
+let eSpeed   = 0.038;
+// Enemy AI state
+let eFireTimer = 3.0;  // countdown to next fire attempt
+let eIsFiring  = false;
+let eFireDuration = 0;
+let enemyFireMeter = 100;  // same as playerFire — 0–100, drains/refills identically
+let eFireLastUsed  = 0;     // timestamp of last fire use, for refill delay
+// Fire cone damage geometry — derived from the actual widest fire flipbook plane
+// (fire-isometric-diagonal: w=1.68,h=2.55,posY=1.14, see makeFireBreath/addFirePlane),
+// not hand-picked. This guarantees the hit cone, the visible debug cone mesh, and the
+// AI's aim/fire-decision angle all agree with what the flame geometry actually renders.
+//
+// PlaneBufferGeometry is centered on its own origin, so a plane of height h placed at
+// local Y=posY spans [posY-h/2, posY+h/2] before the fireBreath group's own scale is
+// applied. The cone tip sits at the mouth bone (Y=0 in fireBreath-local space), so the
+// reachable depth is the plane's FAR edge: (posY + h/2) * FIRE_BONE_SCALE.
+const FIRE_WIDEST_PLANE = { w:1.68, h:2.55, posY:1.14 }; // fire-isometric-diagonal
+const FIRE_PLANE_FAR_EDGE   = (FIRE_WIDEST_PLANE.posY + FIRE_WIDEST_PLANE.h/2) * FIRE_BONE_SCALE;
+const FIRE_PLANE_HALF_WIDTH = (FIRE_WIDEST_PLANE.w/2) * FIRE_BONE_SCALE;
+// The rendered flame (after shader alpha falloff + sprite content margins) visually
+// occupies roughly 60% of its plane's bounding box — i.e. ~40% smaller than the raw
+// plane geometry. Shrink the reach/radius to match what the player actually sees.
+const FIRE_VISIBLE_SHRINK = 0.60;
+const FIRE_CONE_LEN   = FIRE_PLANE_FAR_EDGE   * FIRE_VISIBLE_SHRINK; // world units, from mouth tip
+const FIRE_CONE_RAD   = FIRE_PLANE_HALF_WIDTH * FIRE_VISIBLE_SHRINK; // world units, at far edge
+const FIRE_CONE_RANGE = 2.8;  // world units — AI engagement range, kept independent of visual cone
+const FIRE_CONE_ANGLE = Math.atan(FIRE_CONE_RAD / FIRE_CONE_LEN); // radians half-angle, consistent with LEN/RAD above
+
+// ── Dragon hit/collision capsule — single source of truth ──────────────────
+// Each sphere anchors to a REAL bone (spine/tail/neck) with a local offset that
+// rotates with that bone every frame — same mechanism already used for WING_CAPSULE.
+//
+// This used to anchor every sphere to dragonRoot with a static forward/radial
+// offset, which assumed the torso/tail were rigid relative to the root. They are
+// NOT: the loaded model plays a continuous "flying" animation clip (mixer.update
+// in animate()) that visibly undulates the spine and whips the tail throughout
+// the flight cycle — confirmed by checking the glTF animation data directly,
+// spine_01's translation alone varies by ~0.02 units across the clip, tail bones
+// move comparably. A static root-relative offset was only ever correct at
+// whatever single instant of the animation happened to match bind pose, wrong
+// the rest of the time — which is what produced the "all collision spheres are
+// below the dragon" symptom: the animated mesh spends most of its time away from
+// the bind-pose position the spheres were frozen at.
+//
+// Radii and rest-pose anchor offsets were measured directly from assets/dragon.glb
+// in bind pose (skinned vertices, same centering/scale normalization loadDragon()
+// applies). Each sphere's center was matched to its nearest real bone (sub-1cm for
+// every tail/neck/most-spine sphere; the body0/pelvis sphere sits in a transition
+// zone between the tail and spine chains and is the one weaker match at ~0.028
+// units, anchored to spine_01 since it's the torso side of that joint), then
+// re-expressed as a LOCAL offset from that bone so it rotates correctly with the
+// bone during animation, exactly like WING_CAPSULE's offsets.
+const DRAGON_CAPSULE = [
+  // tail, ordered tip → base
+  { part:'tail', bone:'tail_30212', offset:new THREE.Vector3(-0.0000,-0.0005,-0.0000), r:0.0198 },
+  { part:'tail', bone:'tail_28210', offset:new THREE.Vector3(-0.0049,-0.0004,-0.0000), r:0.0229 },
+  { part:'tail', bone:'tail_25207', offset:new THREE.Vector3(-0.0006,-0.0008,-0.0000), r:0.0239 },
+  { part:'tail', bone:'tail_22204', offset:new THREE.Vector3( 0.0009,-0.0007,-0.0000), r:0.0239 },
+  { part:'tail', bone:'tail_19201', offset:new THREE.Vector3( 0.0017,-0.0007,-0.0000), r:0.0225 },
+  { part:'tail', bone:'tail_16198', offset:new THREE.Vector3( 0.0011, 0.0052,-0.0000), r:0.0236 },
+  { part:'tail', bone:'tail_12194', offset:new THREE.Vector3( 0.0046, 0.0055,-0.0000), r:0.0229 },
+  { part:'tail', bone:'tail_09191', offset:new THREE.Vector3( 0.0043, 0.0048,-0.0000), r:0.0251 },
+  { part:'tail', bone:'tail_07189', offset:new THREE.Vector3(-0.0073, 0.0061,-0.0000), r:0.0244 },
+  { part:'tail', bone:'tail_03185', offset:new THREE.Vector3(-0.0017, 0.0121,-0.0000), r:0.0313 },
+  // torso, ordered rear (pelvis) → forward (neck base)
+  { part:'body', bone:'spine_016',  offset:new THREE.Vector3(-0.0001,-0.0292, 0.0000), r:0.0499 },
+  { part:'body', bone:'spine_0712', offset:new THREE.Vector3(-0.0042,-0.0007, 0.0000), r:0.0561 },
+  { part:'body', bone:'neck_0720',  offset:new THREE.Vector3( 0.0013, 0.0024, 0.0000), r:0.0353 },
+  // head, at the fireBreath/jaw bone's nearest neck anchor
+  { part:'head', bone:'neck_1124',  offset:new THREE.Vector3( 0.0042,-0.0066, 0.0000), r:0.0315 },
+];
+
+// Scratch vectors for the same live bone-tracking pattern getWingCapsuleSpheres
+// already uses — bone world position + world quaternion, local offset rotated
+// into world space by that quaternion, same as the existing fireBreath mouth anchor.
+const _capsuleWorldPos=new THREE.Vector3(), _capsuleWorldQuat=new THREE.Quaternion(), _capsuleLocalOffset=new THREE.Vector3();
+
+// Finds and caches the real bone reference for every DRAGON_CAPSULE entry on a
+// given model root (dragonVisual or enemyVisual). Call once at load time, same
+// pattern as findWingBones/findMouthBone/findNeckBone. Falls back to null per-bone
+// if a different model is loaded — missing bones are skipped, not guessed.
+function findCapsuleBones(root){
+  return DRAGON_CAPSULE.map(s => ({ ...s, boneRef: root.getObjectByName(s.bone) || null }));
+}
+
+// Returns the 14 world-space {center, radius} spheres for a dragon, given its
+// cached findCapsuleBones() result. Reused for player and enemy, debug viz, fire
+// damage, and push-apart. Pass a persistent outArr (e.g. _playerCapsuleScratch) to
+// reuse the same Vector3/wrapper objects across frames instead of allocating new
+// ones every call. Falls back to rootObj-relative placement (no live animation
+// tracking) for any entry whose bone wasn't found, rather than dropping it entirely.
+function getDragonCapsuleSpheres(capsuleBoneRefs, rootObj, outArr){
+  const out = outArr || [];
+  for(let i=0;i<capsuleBoneRefs.length;i++){
+    const s = capsuleBoneRefs[i];
+    let entry = out[i];
+    if(!entry){ entry = { center:new THREE.Vector3(), radius:0, part:s.part }; out[i]=entry; }
+    if(s.boneRef){
+      s.boneRef.updateWorldMatrix(true,false);
+      s.boneRef.getWorldPosition(_capsuleWorldPos);
+      s.boneRef.getWorldQuaternion(_capsuleWorldQuat);
+      _capsuleLocalOffset.copy(s.offset).applyQuaternion(_capsuleWorldQuat);
+      entry.center.copy(_capsuleWorldPos).add(_capsuleLocalOffset);
+    } else if(rootObj){
+      // Fallback for models missing this bone: place relative to root, no live
+      // animation tracking, better than silently omitting the sphere entirely.
+      entry.center.copy(rootObj.position);
+    }
+    entry.radius = s.r;
+  }
+  out.length = capsuleBoneRefs.length;
+  return out;
+}
+
+// ── Wing hit spheres — live-tracked, since wings flap and a static offset from
+// dragonRoot would drift away from the rendered membrane during animation. ──────
+// Each entry anchors to a real wing bone (found via findWingBones, same pattern as
+// findMouthBone/findNeckBone) with a LOCAL offset that rotates with that bone every
+// frame — identical mechanism to the existing fireBreath mouth anchor.
+// Radii/offsets were measured by isolating wing-membrane vertices in dragon.glb
+// (X-isolated from the torso, |localX|>0.05) and splitting the membrane into 3
+// spanwise bands (inner/mid/outer); each sphere covers that band's full chordwise
+// vertex spread, not just the spar bone's thickness — the membrane is a thin sheet,
+// so these spheres are intentionally larger than the spar itself and slightly
+// bulge past the visual surface rather than leave gaps across the wing.
+const WING_CAPSULE = [
+  { side:'l', bone:'l_forearm74',      offset:new THREE.Vector3( 0.0681,-0.0021,-0.0061), r:0.0738 },
+  { side:'l', bone:'l_wingFlapA_0291', offset:new THREE.Vector3( 0.0223,-0.0015,-0.0123), r:0.0682 },
+  { side:'l', bone:'l_wingFlapA_0493', offset:new THREE.Vector3( 0.0542,-0.0040, 0.0140), r:0.0752 },
+  { side:'r', bone:'r_forearm115',      offset:new THREE.Vector3(-0.0681, 0.0021, 0.0061), r:0.0738 },
+  { side:'r', bone:'r_wingFlapA_02132', offset:new THREE.Vector3(-0.0223, 0.0015, 0.0123), r:0.0682 },
+  { side:'r', bone:'r_wingFlapA_04134', offset:new THREE.Vector3(-0.0542, 0.0040,-0.0140), r:0.0752 },
+];
+// Reused scratch quaternion/vector for wing world-position computation.
+const _wingWorldPos=new THREE.Vector3(), _wingWorldQuat=new THREE.Quaternion(), _wingLocalOffset=new THREE.Vector3();
+
+function findWingBones(root){
+  // Exact names from the rigged dragon.glb skeleton; fall back to null per-bone if a
+  // different model is loaded (wing spheres are simply skipped for that bone, rather
+  // than guessing — wrong wing anchors are worse than no wing hit detection at all).
+  return WING_CAPSULE.map(w => ({ ...w, boneRef: root.getObjectByName(w.bone) || null }));
+}
+
+// Computes the 6 live, world-space wing spheres for one dragon. wingBoneRefs comes
+// from findWingBones(dragonVisual) (cached once at load time, not re-traversed).
+// Skips (does not push) any entry whose bone wasn't found on this model.
+function getWingCapsuleSpheres(wingBoneRefs, outArr){
+  const out = outArr || [];
+  let n = 0;
+  for(let i=0;i<wingBoneRefs.length;i++){
+    const w = wingBoneRefs[i];
+    if(!w.boneRef) continue;
+    w.boneRef.updateWorldMatrix(true,false);
+    w.boneRef.getWorldPosition(_wingWorldPos);
+    w.boneRef.getWorldQuaternion(_wingWorldQuat);
+    _wingLocalOffset.copy(w.offset).applyQuaternion(_wingWorldQuat);
+    let entry = out[n];
+    if(!entry){ entry = { center:new THREE.Vector3(), radius:0, part:'wing' }; out[n]=entry; }
+    entry.center.copy(_wingWorldPos).add(_wingLocalOffset);
+    entry.radius = w.r;
+    n++;
+  }
+  out.length = n;
+  return out;
+}
+
+// ── Dragon-vs-dragon push-apart, full capsule (body+tail+head+wings) ───────────
+// Largest possible reach of any single sphere center+radius from dragonRoot, across
+// both DRAGON_CAPSULE and WING_CAPSULE — derived from the same mesh measurements,
+// not guessed. Two dragons can only possibly overlap if root-to-root distance is
+// under roughly 2x this value, so it's used as a cheap early-out before the full
+// 14+6 vs 14+6 pairwise sweep below.
+const DRAGON_MAX_SPHERE_REACH = 0.44;
+const DRAGON_OVERLAP_CHECK_DIST = 2*DRAGON_MAX_SPHERE_REACH + 0.05;
+
+const _overlapScratchA=[], _overlapScratchB=[], _overlapWingA=[], _overlapWingB=[];
+
+// Returns the deepest-overlapping sphere pair between two dragons, or null if none
+// overlap. rootObjA is dragon A's root Object3D (dragonRoot or enemyRoot), used as
+// the fallback placement for any capsule bone that wasn't found on the model.
+// capsuleBonesA is that dragon's cached findCapsuleBones() result (live bone
+// tracking — see getDragonCapsuleSpheres for why that matters). wingBonesA is the
+// cached findWingBones() result (or null to skip wings). Same for B. Used to drive
+// push-apart direction/magnitude with full mesh accuracy instead of a single
+// root-to-root distance.
+function findDeepestDragonOverlap(rootObjA, capsuleBonesA, wingBonesA, rootObjB, capsuleBonesB, wingBonesB){
+  if(!capsuleBonesA || !capsuleBonesB) return null; // model(s) not finished loading yet
+  const spheresA = getDragonCapsuleSpheres(capsuleBonesA, rootObjA, _overlapScratchA);
+  const spheresB = getDragonCapsuleSpheres(capsuleBonesB, rootObjB, _overlapScratchB);
+  const wingsA = wingBonesA ? getWingCapsuleSpheres(wingBonesA, _overlapWingA) : null;
+  const wingsB = wingBonesB ? getWingCapsuleSpheres(wingBonesB, _overlapWingB) : null;
+
+  let best = null, bestDepth = 0;
+  function testPair(a, b){
+    const d = a.center.distanceTo(b.center);
+    const depth = (a.radius + b.radius) - d;
+    if(depth > bestDepth){
+      bestDepth = depth;
+      best = { centerA:a.center, centerB:b.center, depth, dist:d };
+    }
+  }
+  for(let i=0;i<spheresA.length;i++) for(let j=0;j<spheresB.length;j++) testPair(spheresA[i], spheresB[j]);
+  if(wingsA) for(let i=0;i<wingsA.length;i++) for(let j=0;j<spheresB.length;j++) testPair(wingsA[i], spheresB[j]);
+  if(wingsB) for(let i=0;i<spheresA.length;i++) for(let j=0;j<wingsB.length;j++) testPair(spheresA[i], wingsB[j]);
+  if(wingsA && wingsB) for(let i=0;i<wingsA.length;i++) for(let j=0;j<wingsB.length;j++) testPair(wingsA[i], wingsB[j]);
+
+  return best;
+}
+
 let camYaw=0,camPitch=Math.PI/2,camDist=3.80,dragging=false,mx=0,my=0,keys={};
-// Camera modes: 'top' = top-down (default), 'follow' = classic behind-dragon
+// Camera modes: 'top' = top-down (default), 'follow' = classic behind-dragon, 'combat' = over-shoulder
 let camMode='top';
+// Neck look control — mouse in combat mode aims the neck bone
+let neckYaw=0, neckPitch=0;  // radians
+let neckBone=null;
+const NECK_YAW_MAX   = THREE.MathUtils.degToRad(30);
+const NECK_PITCH_MAX = THREE.MathUtils.degToRad(20);
 let collisionDebug=false, debugRoot=null;
 function status(s){statusEl.style.display='block';statusEl.textContent=s;console.log(s)}
 function clamp(x,a,b){return Math.max(a,Math.min(b,x))}
@@ -189,7 +447,7 @@ function init(){
   scene.add(new THREE.HemisphereLight(0xcfe8ff,0x101820,1.45));
   const sun=new THREE.DirectionalLight(0xffffff,2.2); sun.position.set(-18,14,12); scene.add(sun);
   const fill=new THREE.DirectionalLight(0x92c9ff,0.45); fill.position.set(14,6,-12); scene.add(fill);
-  makeStars(); makeEarth(); makeClouds(); makeDragonFallback(); makeFireBreath(); makeShadow(); loadDragon(); loadDolphins(); resetFlight(); addEvents(); animate();
+  makeStars(); makeEarth(); makeClouds(); makeDragonFallback(); makeFireBreath(); makeShadow(); loadDragon(); loadDolphins(); resetFlight(); addEvents(); initEnemyDragon(); animate();
 }
 function makeStars(){
   const g=new THREE.BufferGeometry(), n=1600, arr=new Float32Array(n*3);
@@ -396,6 +654,8 @@ function buildCloudBoundingSpheres(){
   });
   cloudCollisionReady=true;
   status('Phase 2: '+CLOUD_BSPHERES.length+' cloud bounding spheres built — collision active');
+  // Identify polar cloud banks as snow clouds
+  identifySnowBanks();
 
   // ── Build per-puff narrow-phase lookup ────────────────────────────────────
   // Walk the already-built cloudRoot groups and collect every puff mesh
@@ -515,6 +775,7 @@ function initWeather(){
 
   // Build per-bank weather state
   for(let bi=0;bi<CLOUD_BANKS.length;bi++){
+    const isPolar = _snowBanks.has(bi);
     WEATHER.push({
       raining:       false,
       lightning:     false,
@@ -523,6 +784,10 @@ function initWeather(){
       lightningFlashT: -1,
       rainParticles: null,
       lightningGroup: null,
+      snowParticles: null,
+      // Snow timers — only used for polar banks, staggered so they don't all fire at once
+      snowTimer:  isPolar ? (20 + Math.random()*80) : -1,
+      snowActive: false,
     });
   }
   reshuffleStorms();
@@ -620,6 +885,82 @@ function removeRainForBank(bi){
   w.rainParticles.material.dispose();
   w.rainParticles = null;
 }
+
+
+// ── Snow cloud system ────────────────────────────────────────────────────
+function identifySnowBanks(){
+  _snowBanks.clear();
+  CLOUD_BANKS.forEach((bank, bi)=>{
+    if(Math.abs(bank.lat) > 45){
+      _snowBanks.add(bi);
+      colorSnowCloud(bi, true);
+    }
+  });
+}
+
+function colorSnowCloud(bi, isSnow){
+  if(!cloudRoot || !cloudRoot.children[bi]) return;
+  const group = cloudRoot.children[bi];
+  group.children.forEach(child=>{
+    const mat = child.material;
+    if(!mat) return;
+    if(!child.userData._origColor){
+      child.userData._origColor = mat.color ? mat.color.clone() : new THREE.Color(1,1,1);
+    }
+    if(isSnow){
+      if(!child.userData._matCloned){
+        child.material = mat.clone();
+        child.userData._matCloned = true;
+      }
+      child.material.color.setRGB(0.58, 0.62, 0.68);
+    } else {
+      if(child.userData._origColor && child.userData._matCloned){
+        child.material.color.copy(child.userData._origColor);
+      }
+    }
+  });
+}
+
+
+function makeSnowForBank(bi){
+  if(!WEATHER[bi] || WEATHER[bi].snowParticles) return;
+  const COUNT = 140;
+  const pos  = new Float32Array(COUNT*3);
+  const velX = new Float32Array(COUNT);
+  const velY = new Float32Array(COUNT);
+  const velZ = new Float32Array(COUNT);
+  for(let i=0;i<COUNT;i++){
+    pos[i*3+0] = (Math.random()-0.5)*1.2;
+    pos[i*3+1] = -(Math.random()*1.8);
+    pos[i*3+2] = (Math.random()-0.5)*1.2;
+    velX[i] = (Math.random()-0.5)*0.015;
+    velY[i] = -(0.22 + Math.random()*0.18); // slow — snow not rain
+    velZ[i] = (Math.random()-0.5)*0.015;
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos,3));
+  const mat = new THREE.PointsMaterial({
+    color:0xddeeff, size:0.055, transparent:true, opacity:0.70,
+    depthWrite:false, blending:THREE.AdditiveBlending, sizeAttenuation:true,
+  });
+  const pts = new THREE.Points(geo, mat);
+  pts.frustumCulled = false;
+  pts.userData.flakeCount = COUNT;
+  pts.userData.velX = velX;
+  pts.userData.velY = velY;
+  pts.userData.velZ = velZ;
+  scene.add(pts);
+  WEATHER[bi].snowParticles = pts;
+}
+
+function removeSnowForBank(bi){
+  if(!WEATHER[bi] || !WEATHER[bi].snowParticles) return;
+  scene.remove(WEATHER[bi].snowParticles);
+  WEATHER[bi].snowParticles.geometry.dispose();
+  WEATHER[bi].snowParticles.material.dispose();
+  WEATHER[bi].snowParticles = null;
+}
+
 
 // Generate a jagged lightning bolt between two 3D points
 function makeBoltPoints(start, end, offset, depth){
@@ -804,6 +1145,65 @@ function updateWeather(dt, t){
     }
   });
 
+  // ── Per-bank snow timers — each polar bank independently starts/stops ────
+  // Exactly like rain: each bank has a snowTimer counting down.
+  // When it fires: if currently snowing → stop and wait; if stopped → start and snow.
+  let anySnow = false;
+  _snowBanks.forEach(bi=>{
+    const w  = WEATHER[bi];
+    const bs = CLOUD_BSPHERES[bi];
+    if(!w || !bs) return;
+
+    // Init timer on first encounter
+    if(w.snowTimer === undefined){
+      w.snowTimer   = 20 + Math.random()*60;  // staggered first start
+      w.snowActive  = false;
+    }
+
+    w.snowTimer -= dt;
+    if(w.snowTimer <= 0){
+      if(!w.snowActive){
+        // Start snowing — lasts 15–90 seconds
+        w.snowActive = true;
+        w.snowTimer  = 15 + Math.random()*75;
+      } else {
+        // Stop — wait 30–180 seconds before next event
+        w.snowActive = false;
+        w.snowTimer  = 30 + Math.random()*150;
+        removeSnowForBank(bi);
+      }
+    }
+
+    if(!w.snowActive) return;
+    anySnow = true;
+
+    // Create particles if needed
+    if(!w.snowParticles) makeSnowForBank(bi);
+    const sp = w.snowParticles;
+    if(!sp) return;
+
+    // Anchor at cloud base
+    const up        = bs.currentCenter.clone().normalize();
+    const cloudBase = bs.currentCenter.clone().addScaledVector(up, -0.28);
+    sp.position.copy(cloudBase);
+    sp.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0), up);
+
+    // Animate flakes
+    const posArr = sp.geometry.attributes.position.array;
+    const n      = sp.userData.flakeCount;
+    for(let i=0;i<n;i++){
+      posArr[i*3+0] += (sp.userData.velX[i] + Math.sin(t*0.8+i*0.31)*0.006)*dt;
+      posArr[i*3+1] +=  sp.userData.velY[i]*dt;
+      posArr[i*3+2] += (sp.userData.velZ[i] + Math.cos(t*0.7+i*0.23)*0.005)*dt;
+      if(posArr[i*3+1] < -1.9){
+        posArr[i*3+0] = (Math.random()-0.5)*1.2;
+        posArr[i*3+1] = -Math.random()*0.1;
+        posArr[i*3+2] = (Math.random()-0.5)*1.2;
+      }
+    }
+    sp.geometry.attributes.position.needsUpdate = true;
+  });
+
   // Clean up rain for banks that are no longer storms
   for(let bi=0;bi<CLOUD_BANKS.length;bi++){
     if(!_stormBanks.has(bi) && WEATHER[bi] && WEATHER[bi].rainParticles){
@@ -816,7 +1216,7 @@ function updateWeather(dt, t){
   if(_weatherHudEl){
     if(anyStorm){
       _weatherHudEl.style.display='block';
-      _weatherHudEl.textContent = '⛈ '+_stormBanks.size+' storm'+ (_stormBanks.size>1?'s':'');
+      _weatherHudEl.textContent = '⛈ '+_stormBanks.size+' storm'+ (_stormBanks.size>1?'s':'')+(anySnow?' ❄':'');
     } else {
       _weatherHudEl.style.display='none';
     }
@@ -832,23 +1232,29 @@ function toggleCollisionDebug(){
    // Clear previous debug meshes
    while(debugRoot.children.length) debugRoot.remove(debugRoot.children[0]);
 
-   // Dragon collision: body sphere at origin + head sphere offset forward along +Z
-   // The dragon model faces +Z (forward direction). Spine runs ≈2.2 units long.
-   // Body centre sphere (covers wings/torso)
-   const bodyMat=new THREE.MeshBasicMaterial({color:0x00ffff,wireframe:true,transparent:true,opacity:0.7});
-   const bodyS=new THREE.Mesh(new THREE.SphereGeometry(0.28,16,8),bodyMat);
-   bodyS.userData.isDragonBody=true;
-   debugRoot.add(bodyS);
-   // Neck/head sphere — offset forward (+Z in dragon local = forward flight dir)
-   const headMat=new THREE.MeshBasicMaterial({color:0x00ffee,wireframe:true,transparent:true,opacity:0.7});
-   const headS=new THREE.Mesh(new THREE.SphereGeometry(0.18,16,8),headMat);
-   headS.userData.isDragonHead=true;
-   debugRoot.add(headS);
-   // Tail sphere — offset backward
-   const tailMat=new THREE.MeshBasicMaterial({color:0x00eeff,wireframe:true,transparent:true,opacity:0.5});
-   const tailS=new THREE.Mesh(new THREE.SphereGeometry(0.14,16,8),tailMat);
-   tailS.userData.isDragonTail=true;
-   debugRoot.add(tailS);
+   // Dragon collision: full 14-sphere DRAGON_CAPSULE (tail tip → tail base → torso → head),
+   // derived from the actual dragon.glb mesh — see the DRAGON_CAPSULE definition for how.
+   // Color-coded by part so the chain is readable: tail=blue, body=cyan, head=teal.
+   const PART_COLOR={tail:0x3399ff, body:0x00ffff, head:0x00ffaa};
+   DRAGON_CAPSULE.forEach((s,i)=>{
+     const mat=new THREE.MeshBasicMaterial({color:PART_COLOR[s.part]||0x00ffff,wireframe:true,transparent:true,opacity:0.6});
+     const sph=new THREE.Mesh(new THREE.SphereGeometry(s.r,12,6),mat);
+     sph.userData.isDragonCapsuleSphere=true;
+     sph.userData.capsuleIdx=i;
+     debugRoot.add(sph);
+   });
+   // Wing hit spheres (magenta) — live-tracked, only shown if wing bones were found
+   // on the loaded model. Positioned every frame in the animate() loop below, same
+   // as the body/tail/head spheres, but via getWingCapsuleSpheres (bone-anchored).
+   if(playerWingBones){
+     WING_CAPSULE.forEach((w,i)=>{
+       const mat=new THREE.MeshBasicMaterial({color:0xff44ff,wireframe:true,transparent:true,opacity:0.6});
+       const sph=new THREE.Mesh(new THREE.SphereGeometry(w.r,12,6),mat);
+       sph.userData.isWingCapsuleSphere=true;
+       sph.userData.wingIdx=i;
+       debugRoot.add(sph);
+     });
+   }
    // Phase 2: cloud bounding spheres (yellow wireframe)
    if(cloudCollisionReady){
      CLOUD_BSPHERES.forEach(bs=>{
@@ -861,7 +1267,7 @@ function toggleCollisionDebug(){
        cm.userData.bsRef=bs;
        debugRoot.add(cm);
      });
-     status('Collision Debug ON — cyan=dragon, yellow=cloud bspheres ('+CLOUD_BSPHERES.length+')');
+     status('Collision Debug ON — blue/cyan/teal=dragon ('+DRAGON_CAPSULE.length+' spheres), magenta=wings ('+WING_CAPSULE.length+'), yellow=cloud bspheres ('+CLOUD_BSPHERES.length+')');
    }
  }
 }
@@ -1045,10 +1451,11 @@ function updateCloudCollision(dt){
       insideCloudBanks.push(bs.bankIdx);
 
       // ── Narrow phase: per-puff scatter ──────────────────────────────────
-      // Storm clouds do NOT scatter — they are too dense/heavy
+      // Storm clouds and snow clouds do NOT scatter — too dense/heavy
       const isStorm = _stormBanks && _stormBanks.has(bs.bankIdx);
+      const isSnowCloud = _snowBanks && _snowBanks.has(bs.bankIdx);
       const puffs = PUFF_BY_BANK[bs.bankIdx];
-      if(!isStorm && puffs && puffs.length){
+      if(!isStorm && !isSnowCloud && puffs && puffs.length){
         // Refresh world positions for this bank's puffs right now
         const group = cloudRoot.children[bs.bankIdx];
         if(group){
@@ -1193,7 +1600,7 @@ function makeEarth(){
   const chloro=tex(ASSET.chloro,{aniso:8});
   const shallow=tex(ASSET.shallow,{aniso:8});
   earthMat=new THREE.ShaderMaterial({
-    uniforms:{time:{value:0},baseMap:{value:base},nasaAtlas:{value:nasaAtlas},useNasaTiles:{value:1.0},topoMap:{value:topo},heightNormalMap:{value:heightNormal},landMap:{value:land},coastMap:{value:coast},shoreMap:{value:shore},lakeMap:{value:lakes},waveA:{value:waveA},waterNormal:{value:waterN},oceanColorMap:{value:oceanColor},chloroMap:{value:chloro},shallowMap:{value:shallow},sunDir:{value:new THREE.Vector3(-0.62,0.55,0.45).normalize()},dragonGroundDir:{value:new THREE.Vector3(.20,.55,.81).normalize()},detailBoost:{value:1.0},dragonShimmerStrength:{value:0.55},dragonShadowStrength:{value:0.42}},
+    uniforms:{time:{value:0},baseMap:{value:base},nasaAtlas:{value:nasaAtlas},useNasaTiles:{value:1.0},topoMap:{value:topo},heightNormalMap:{value:heightNormal},landMap:{value:land},coastMap:{value:coast},shoreMap:{value:shore},lakeMap:{value:lakes},waveA:{value:waveA},waterNormal:{value:waterN},oceanColorMap:{value:oceanColor},chloroMap:{value:chloro},shallowMap:{value:shallow},sunDir:{value:new THREE.Vector3(-0.62,0.55,0.45).normalize()},dragonGroundDir:{value:new THREE.Vector3(.20,.55,.81).normalize()},detailBoost:{value:1.0},dragonShimmerStrength:{value:0.55},dragonShadowStrength:{value:0.42},snowCover:{value:new THREE.Vector4(0,0,0,0)}},
     vertexShader:`
       varying vec2 vUv; varying vec3 vN; varying vec3 vW; varying float vH; varying float vLand;
       uniform sampler2D topoMap; uniform sampler2D landMap; uniform sampler2D shoreMap;
@@ -1232,6 +1639,7 @@ function makeEarth(){
       precision highp float;
       varying vec2 vUv; varying vec3 vN; varying vec3 vW; varying float vH; varying float vLand;
       uniform float time; uniform float detailBoost; uniform float dragonShimmerStrength; uniform float dragonShadowStrength; uniform vec3 sunDir; uniform vec3 dragonGroundDir;
+      uniform vec4 snowCover; // x=north accum, y=south accum, z=unused, w=unused
       uniform sampler2D baseMap,topoMap,heightNormalMap,landMap,coastMap,shoreMap,lakeMap,waveA,waterNormal,oceanColorMap,chloroMap,shallowMap;
       uniform sampler2D nasaAtlas;
       uniform float useNasaTiles;
@@ -1448,6 +1856,18 @@ function makeEarth(){
         shadowOpacity = mix(shadowOpacity, 0.22, lakeMask);
         col *= (1.0 - dragonShadow * shadowOpacity);
 
+        // ── SNOW ACCUMULATION OVERLAY ──────────────────────────────────────
+        // vUv.y: 0=south pole, 0.5=equator, 1=north pole
+        float latN = smoothstep(0.62, 0.78, vUv.y);
+        float latS = smoothstep(0.38, 0.22, vUv.y);
+        float accumMaskN = latN * snowCover.x * land;
+        float accumMaskS = latS * snowCover.y * land;
+        float accumMask  = clamp(accumMaskN + accumMaskS, 0.0, 1.0);
+        float snowBump   = sin(vUv.x*180.0+time*0.02)*sin(vUv.y*90.0)*0.018;
+        vec3  accumSnowCol = vec3(0.88+snowBump, 0.92+snowBump, 0.97);
+        float highGround = smoothstep(0.28, 0.52, topo) * 0.4 + 0.6;
+        col = mix(col, accumSnowCol, accumMask * highGround);
+
         gl_FragColor=vec4(col,1.0);
       }`
   });
@@ -1548,9 +1968,39 @@ function findMouthBone(root){
   candidates.sort((a,b)=>score((b.name||'').toLowerCase())-score((a.name||'').toLowerCase()));
   return candidates[0]||null;
 }
-function updateFireBreath(t){
+function findNeckBone(root){
+  // Try common neck bone names in priority order
+  const names = ['neck','neck.001','Neck','neck_01','head','Head','spine.006','spine006'];
+  for(const n of names){
+    const b = root.getObjectByName(n);
+    if(b) return b;
+  }
+  // Fallback: find first bone with 'neck' or 'head' in name
+  let found = null;
+  root.traverse(o=>{
+    if(!found && o.isBone){
+      const nm = (o.name||'').toLowerCase();
+      if(/neck|head/.test(nm)) found = o;
+    }
+  });
+  return found;
+}
+
+function updateNeckLook(){
+  if(!neckBone) return;
+  if(camMode !== 'combat'){
+    neckYaw   += (0 - neckYaw)   * 0.08;
+    neckPitch += (0 - neckPitch) * 0.08;
+  }
+  // Mixer already set the animated rotation this frame — add our offset on top
+  neckBone.rotation.order = 'YXZ';
+  neckBone.rotation.y += neckYaw;
+  neckBone.rotation.x += neckPitch;
+}
+
+function updateFireBreath(dt,t){
   if(!fireBreath) return;
-  const visTarget=keys.space?1.0:0.0;
+  const visTarget=(keys.space && playerFire>0)?1.0:0.0;
   fireActive = fireActive || visTarget>0.0;
   let anyVisible=false;
   const fps=26, offsets=[0,13,29,7];
@@ -1566,8 +2016,6 @@ function updateFireBreath(t){
   }
   fireBreath.visible=anyVisible;
   if(fireGlow) fireGlow.material.opacity=(0.10+0.07*Math.sin(t*18.0))*fireMats[0].uniforms.visibility.value;
-  // Active position/orientation control: use the animator-authored FireBreath.28 bone
-  // as a WORLD anchor, but keep the fire as a scene child so its scale stays visible.
   if(mouthBone){
     mouthBone.updateWorldMatrix(true,false);
     mouthBone.getWorldPosition(_fireWorldPos);
@@ -1576,6 +2024,46 @@ function updateFireBreath(t){
     fireBreath.position.copy(_fireWorldPos).add(_fireLocalOffset);
     fireBreath.quaternion.copy(_fireWorldQuat).multiply(_fireLocalRotQuat);
     fireBreath.scale.setScalar(FIRE_BONE_SCALE);
+  }
+
+  // ── Player fire cone visual — wraps the actual fire mesh exactly ───────
+  if(playerFireCone){
+    const firing = fireMats.length > 0 && fireMats[0].uniforms.visibility.value > 0.05;
+    playerFireCone.visible = firing;
+    if(firing){
+      // The fire planes extend along fireBreath's own local +Y axis.
+      // Extract that exact world direction instead of recomputing it —
+      // guarantees the cone always wraps the actual fire, including neck rotation.
+      const fireFwd = new THREE.Vector3(0,1,0).applyQuaternion(fireBreath.quaternion).normalize();
+      playerFireCone.position.copy(fireBreath.position);
+      playerFireCone.quaternion.setFromUnitVectors(new THREE.Vector3(0,-1,0), fireFwd);
+      playerFireCone.material.opacity = 0.18 + 0.12*Math.sin(clock.elapsedTime*12);
+      playerFireCone.userData.fireFwd = fireFwd; // cache for damage check
+    }
+  }
+
+  // ── Player fire damages enemy — cone vs enemy capsule spheres ───────────
+  if(anyVisible && enemyRoot){
+    // Same exact origin as the visual fire and cone
+    const mouthPos = fireBreath.position.clone();
+    // Use neck-adjusted fire direction if available
+    const fireFwd = (playerFireCone && playerFireCone.userData.fireFwd)
+      ? playerFireCone.userData.fireFwd
+      : forward;
+    let hit = false;
+    if(enemyCapsuleBones){
+      const eSpheres = getDragonCapsuleSpheres(enemyCapsuleBones, enemyRoot, _enemyCapsuleScratch);
+      for(let i=0;i<eSpheres.length;i++){
+        if(coneHitsSphere(mouthPos, fireFwd, FIRE_CONE_ANGLE, FIRE_CONE_LEN, eSpheres[i].center, eSpheres[i].radius)){ hit=true; break; }
+      }
+    }
+    if(!hit && enemyWingBones){
+      const eWings = getWingCapsuleSpheres(enemyWingBones, _enemyWingScratch);
+      for(let i=0;i<eWings.length;i++){
+        if(coneHitsSphere(mouthPos, fireFwd, FIRE_CONE_ANGLE, FIRE_CONE_LEN, eWings[i].center, eWings[i].radius)){ hit=true; break; }
+      }
+    }
+    if(hit) enemyHP = Math.max(0, enemyHP - 5.0 * dt);
   }
 }
 
@@ -2213,6 +2701,44 @@ function loadDragon(){
     mouthBone=findMouthBone(dragonVisual);
     makeFireBreath();
     status('Mouth fire anchor: '+(mouthBone?mouthBone.name:'fallback local offset'));
+    neckBone = findNeckBone(dragonVisual);
+    status(neckBone ? ('Neck bone found: '+neckBone.name) : 'No neck bone found — mouse-look disabled');
+    playerWingBones = findWingBones(dragonVisual);
+    const playerWingsFound = playerWingBones.filter(w=>w.boneRef).length;
+    status('Wing hit-spheres: '+playerWingsFound+'/'+WING_CAPSULE.length+' bones found');
+    playerCapsuleBones = findCapsuleBones(dragonVisual);
+    const playerCapsuleFound = playerCapsuleBones.filter(s=>s.boneRef).length;
+    status('Capsule hit-spheres: '+playerCapsuleFound+'/'+DRAGON_CAPSULE.length+' bones found');
+    // TEMP DIAGNOSTIC: log each capsule bone's name/found-status and, once live,
+    // its actual computed world position, so we can see directly in devtools
+    // console whether bones resolved correctly and whether positions spread out
+    // along the body or collapse together. Remove once the collapsed-sphere issue
+    // is resolved.
+    console.log('[capsule-debug] bone lookup results:');
+    playerCapsuleBones.forEach((s,i)=>{
+      console.log('  ['+i+'] part='+s.part+' bone="'+s.bone+'" found='+(!!s.boneRef));
+    });
+    setTimeout(()=>{
+      if(!playerCapsuleBones) return;
+      console.log('[capsule-debug] live world positions 2s after load:');
+      const diag = getDragonCapsuleSpheres(playerCapsuleBones, dragonRoot, []);
+      diag.forEach((sp,i)=>{
+        console.log('  ['+i+'] part='+sp.part+' center=('+sp.center.x.toFixed(4)+','+sp.center.y.toFixed(4)+','+sp.center.z.toFixed(4)+') r='+sp.radius);
+      });
+      console.log('[capsule-debug] dragonRoot.position=('+dragonRoot.position.x.toFixed(4)+','+dragonRoot.position.y.toFixed(4)+','+dragonRoot.position.z.toFixed(4)+')');
+      // Final cross-check: list real runtime bone names matching our expected
+      // prefixes, to confirm the dot-stripped names we now look up actually exist.
+      const relevant = [];
+      dragonVisual.traverse(o=>{ if(o.isBone && /^(tail_|spine_|neck_|l_forearm|r_forearm|l_wingFlap|r_wingFlap)/.test(o.name)) relevant.push(o.name); });
+      console.log('[capsule-debug] actual runtime bone names ('+relevant.length+'):', relevant);
+    }, 2000);
+    if(!neckBone){
+      // Debug: list all bone names containing common keywords so we can identify the right one
+      const allBoneNames = [];
+      dragonVisual.traverse(o=>{ if(o.isBone) allBoneNames.push(o.name); });
+      console.log('All bone names ('+allBoneNames.length+'):', allBoneNames);
+      status('Bone names logged to console — press F12 to inspect');
+    }
     if(gltf.animations&&gltf.animations.length){mixer=new THREE.AnimationMixer(dragonVisual); const fly=gltf.animations.find(c=>/fly/i.test(c.name))||gltf.animations[0]; flyAction=mixer.clipAction(fly); flyAction.play(); status('Dragon loaded: '+fly.name);} else status('Dragon loaded: no animation clips found.');
   },undefined,e=>status('Dragon load failed. Use local server: python -m http.server. '+(e.message||'')));
 }
@@ -2293,37 +2819,56 @@ function updateFlight(dt){
   if(flyAction) flyAction.timeScale=flyAnimSpeed;
 }
 function updateCamera(dt){
-  const target=dragonRoot.position.clone().add(radial.clone().multiplyScalar(.20));
-  let desired;
+  const target = dragonRoot.position.clone().addScaledVector(radial, 0.20);
 
   if(camMode==='top'){
-    // Top-down: camera sits directly above dragon along radial axis.
-    // Use dragon's forward vector to keep the view consistently oriented —
-    // when dragon turns 180° the camera rotates with it so forward stays "up" on screen.
-    const up = radial.clone();                          // away from Earth
+    const up = radial.clone();
     const camPos = dragonRoot.position.clone()
-      .addScaledVector(up, camDist)                     // lift above dragon
-      .addScaledVector(forward, 0.2);                   // slight forward offset
+      .addScaledVector(up, camDist)
+      .addScaledVector(forward, 0.2);
     camera.position.lerp(camPos, 1-Math.exp(-dt*5.0));
-
-    // LookAt: aim at dragon, use dragon's forward as the camera's world-up
-    // so the view always has forward pointing "up" on screen regardless of heading
-    const lookTarget = dragonRoot.position.clone()
-      .addScaledVector(forward, 0.5);
-    camera.up.copy(forward);                            // lock screen-up to flight direction
+    const lookTarget = dragonRoot.position.clone().addScaledVector(forward, 0.5);
+    camera.up.copy(forward);
     camera.lookAt(lookTarget);
-  } else {
-    // Classic follow-cam: behind and slightly above
-    const behind=forward.clone().negate().applyAxisAngle(radial,camYaw).normalize();
-    const up=radial.clone();
-    desired=target.clone()
+
+  } else if(camMode==='follow'){
+    const behind = forward.clone().negate().applyAxisAngle(radial, camYaw).normalize();
+    const up = radial.clone();
+    const desired = target.clone()
       .add(behind.multiplyScalar(Math.cos(camPitch)*camDist))
       .add(up.multiplyScalar(Math.sin(camPitch)*camDist));
-    camera.position.lerp(desired,1-Math.exp(-dt*6.0));
+    camera.position.lerp(desired, 1-Math.exp(-dt*6.0));
     camera.lookAt(target.clone().add(forward.clone().multiplyScalar(.85)));
+
+  } else if(camMode==='combat'){
+    // ── Over-shoulder combat camera ──────────────────────────────────────
+    // Sits close behind and just above the right shoulder, looks ahead along
+    // the dragon's forward + slight downward tilt so horizon is visible.
+    // All vectors are in world space, derived fresh from radial/forward/right
+    // every frame so the camera is fully dynamic through turns and altitude changes.
+
+    const up = radial.clone();                   // away from Earth centre
+
+    // Shoulder offset: slightly to the right and above the dragon body
+    const shoulderPos = dragonRoot.position.clone()
+      .addScaledVector(forward, -0.55)           // further behind
+      .addScaledVector(right,    0.18)           // right shoulder
+      .addScaledVector(up,       0.45);          // higher up so bars are in frame
+
+    camera.position.lerp(shoulderPos, 1 - Math.exp(-dt * 10.0));
+
+    const lookAhead = dragonRoot.position.clone()
+      .addScaledVector(forward,  1.4)            // look a bit closer ahead
+      .addScaledVector(up,       0.15);          // tilt up slightly to show bars
+
+    // camera.up = radial so horizon stays level through globe curvature
+    camera.up.copy(up);
+    camera.lookAt(lookAhead);
   }
 }
 function addEvents(){
+  // Prevent text selection / drag artifacts while controlling neck or camera
+  canvas.addEventListener('contextmenu', e=>e.preventDefault());
   addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight);});
   addEventListener('keydown',e=>{
     if(e.code==='ArrowUp')   keys.up=true;
@@ -2337,11 +2882,14 @@ function addEvents(){
     if(e.code==='KeyC')      toggleClouds();
     if(e.code==='KeyV')      toggleCollisionDebug();
     if(e.code==='KeyT'){
-      // Toggle between top-down and follow cam
       if(camMode==='top'){
         camMode='follow'; camPitch=0.14; camDist=3.20;
-        camera.up.set(0,1,0); // restore default world up for follow cam
+        camera.up.set(0,1,0);
         status('Camera: Follow (T to switch)');
+      } else if(camMode==='follow'){
+        camMode='combat';
+        camera.up.set(0,1,0);
+        status('Camera: Combat — over-shoulder (T to switch)');
       } else {
         camMode='top'; camPitch=Math.PI/2; camDist=3.80;
         status('Camera: Top-down (T to switch)');
@@ -2360,16 +2908,31 @@ function addEvents(){
   });
   // Mouse drag: in top-down mode rotates the overhead view (camYaw only)
   // In follow mode: yaw + pitch orbit
-  canvas.addEventListener('mousedown',e=>{dragging=true;mx=e.clientX;my=e.clientY;});
-  addEventListener('mouseup',()=>dragging=false);
+  canvas.addEventListener('mousedown',e=>{
+    dragging=true; mx=e.clientX; my=e.clientY;
+    // Left click fires, same as SPACE — works in any camera mode
+    if(e.button===0){ keys.space=true; }
+  });
+  addEventListener('mouseup',e=>{
+    dragging=false;
+    if(e.button===0){ keys.space=false; }
+  });
   addEventListener('mousemove',e=>{
-    if(!dragging) return;
     const dx=e.clientX-mx, dy=e.clientY-my;
     mx=e.clientX; my=e.clientY;
-    camYaw -= dx*0.006;
-    if(camMode==='follow') camPitch=clamp(camPitch+dy*0.004,-.35,.85);
-    // In top-down mode, vertical drag adjusts height (camDist)
-    if(camMode==='top') camDist=clamp(camDist+dy*0.012,1.45,12.0);
+
+    if(camMode==='combat'){
+      // Guard against huge dx/dy on the very first move after switching modes
+      const safeDx = clamp(dx, -40, 40), safeDy = clamp(dy, -40, 40);
+      // Combat mode: neck follows raw mouse movement continuously — no drag/click needed
+      neckYaw   = clamp(neckYaw   - safeDx*0.004, -NECK_YAW_MAX,   NECK_YAW_MAX);
+      neckPitch = clamp(neckPitch + safeDy*0.004, -NECK_PITCH_MAX, NECK_PITCH_MAX);
+    } else if(dragging){
+      // Top/follow modes: orbit camera only while dragging (click+drag)
+      camYaw -= dx*0.006;
+      if(camMode==='follow') camPitch=clamp(camPitch+dy*0.004,-.35,.85);
+      if(camMode==='top')    camDist=clamp(camDist+dy*0.012,1.45,12.0);
+    }
   });
   // Wheel: zoom in/out in both modes
   canvas.addEventListener('wheel',e=>{
@@ -2377,33 +2940,513 @@ function addEvents(){
     camDist=clamp(camDist+e.deltaY*0.004, 1.45, 12.0);
   },{passive:false});
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// POLAR SNOW SYSTEM
+// ════════════════════════════════════════════════════════════════════════════
+
+// ── Polar zone definitions ───────────────────────────────────────────────
+// Each zone: { name, lat, lon, radius (deg), hemisphere: 'N'|'S' }
+// These are the snow-bearing regions: arctic, greenland, canada, etc.
+
+
+// ════════════════════════════════════════════════════════════════════════════
+
+// ── Cone vs sphere intersection ───────────────────────────────────────────
+// Returns true if sphere (centre, radius) intersects the cone defined by
+// (tip, direction, halfAngle, length). Uses closest-point-on-ray to sphere.
+function coneHitsSphere(tip, dir, halfAngle, coneLen, sphereCentre, sphereR){
+  const toSphere = sphereCentre.clone().sub(tip);
+  // Project onto cone axis
+  const proj = toSphere.dot(dir);
+  // Clamp to cone length
+  if(proj < -sphereR || proj > coneLen + sphereR) return false;
+  // Distance from axis
+  const closest = tip.clone().addScaledVector(dir, Math.max(0, Math.min(proj, coneLen)));
+  const distToAxis = closest.distanceTo(sphereCentre);
+  // Cone radius at this depth
+  const coneR = Math.tan(halfAngle) * Math.max(0, Math.min(proj, coneLen));
+  return distToAxis < coneR + sphereR;
+}
+// ENEMY DRAGON SYSTEM
+// ════════════════════════════════════════════════════════════════════════════
+
+function makeEnemyFireCone(){
+  const cone = makeFireCone(0xff6600);
+  cone.name = 'enemyFireCone';
+  return cone;
+}
+
+let enemyFireCone = null;
+let playerFireCone = null;
+
+function makeFireCone(color){
+  // Geometry matches FIRE_CONE_LEN/FIRE_CONE_RAD exactly — derived once from the actual
+  // widest fire flipbook plane (see the FIRE_CONE_* block near the top of the file),
+  // so this debug/visual cone always represents the true hit-test volume.
+  const geo = new THREE.ConeBufferGeometry(FIRE_CONE_RAD, FIRE_CONE_LEN, 12, 1, true);
+  // ConeBufferGeometry: tip at +Y/2, base at -Y/2
+  // Translate down so tip sits at Y=0, base at -FIRE_CONE_LEN (opens in -Y direction)
+  // We will orient the cone so its -Y axis points along fire direction (forward)
+  geo.translate(0, -FIRE_CONE_LEN/2, 0); // tip at Y=0, base at Y=-FIRE_CONE_LEN
+  const mat = new THREE.MeshBasicMaterial({
+    color, transparent:true, opacity:0.0,
+    blending:THREE.AdditiveBlending, depthWrite:false, side:THREE.DoubleSide,
+  });
+  return new THREE.Mesh(geo, mat);
+}
+
+function initEnemyDragon(){
+  // Root object for enemy — placed on the sphere like dragonRoot
+  enemyRoot = new THREE.Group();
+  enemyRoot.name = 'enemyDragonRoot';
+  scene.add(enemyRoot);
+
+  // Place opposite side of globe initially
+  eRadial.set(-0.20, 0.55, -0.81).normalize();
+  eForward.set(0,0,-1);
+  eProjectForward();
+  const pos = eRadial.clone().multiplyScalar(earthR + eAltitude);
+  enemyRoot.position.copy(pos);
+
+  // Fire cone visual
+  enemyFireCone = makeEnemyFireCone();
+  enemyFireCone.visible = false;
+  scene.add(enemyFireCone);
+
+  // Player fire cone — same geometry, slightly more yellow-orange tint
+  playerFireCone = makeFireCone(0xff9900);
+  playerFireCone.name = 'playerFireCone';
+  playerFireCone.visible = false;
+  scene.add(playerFireCone);
+
+  // Load same dragon model
+  status('Loading enemy dragon...');
+  new THREE.GLTFLoader().load(ASSET.dragon, gltf=>{
+    enemyRoot.clear();
+    enemyVisual = gltf.scene;
+    const box=new THREE.Box3().setFromObject(enemyVisual), size=new THREE.Vector3(), ctr=new THREE.Vector3();
+    box.getSize(size); box.getCenter(ctr);
+    enemyVisual.position.sub(ctr);
+    const maxDim=Math.max(size.x,size.y,size.z)||1;
+    enemyVisual.scale.setScalar(0.78/maxDim);
+
+    // Tint enemy red so it's visually distinct
+    enemyVisual.traverse(o=>{
+      if(o.isMesh){
+        o.frustumCulled=false;
+        const mats=Array.isArray(o.material)?o.material:[o.material];
+        mats.forEach(m=>{
+          if(!m) return;
+          m.color && m.color.multiplyScalar(1.0);
+          // Red tint
+          if(m.color) m.color.set(0x8b1a1a);
+          m.side=THREE.DoubleSide;
+          if('roughness' in m) m.roughness=0.74;
+          if(o.isSkinnedMesh) m.skinning=true;
+          m.needsUpdate=true;
+        });
+        if(o.isSkinnedMesh){
+          o.customDepthMaterial=new THREE.MeshDepthMaterial({depthPacking:THREE.RGBADepthPacking});
+          o.customDepthMaterial.skinning=true;
+          o.customDepthMaterial.side=THREE.DoubleSide;
+        }
+      }
+    });
+    enemyRoot.add(enemyVisual);
+    enemyMouthBone = findMouthBone(enemyVisual);
+    enemyWingBones = findWingBones(enemyVisual);
+    enemyCapsuleBones = findCapsuleBones(enemyVisual);
+
+    // Fire breath — reuse same material factory
+    makeEnemyFireBreath();
+
+    if(gltf.animations&&gltf.animations.length){
+      enemyMixer=new THREE.AnimationMixer(enemyVisual);
+      const fly=gltf.animations.find(c=>/fly/i.test(c.name))||gltf.animations[0];
+      enemyAction=enemyMixer.clipAction(fly);
+      enemyAction.play();
+    }
+    status('Enemy dragon loaded');
+  }, undefined, e=>status('Enemy load failed: '+(e.message||'')));
+}
+
+function makeEnemyFireBreath(){
+  if(enemyFire && enemyFire.parent) enemyFire.parent.remove(enemyFire);
+  const loader = new THREE.TextureLoader();
+  const side=loader.load(ASSET.fireSide), iso=loader.load(ASSET.fireIso), topTex=loader.load(ASSET.fireTop);
+  [side,iso,topTex].forEach(t=>{
+    t.encoding=THREE.sRGBEncoding; t.wrapS=t.wrapT=THREE.RepeatWrapping;
+    t.magFilter=THREE.LinearFilter; t.minFilter=THREE.LinearMipMapLinearFilter;
+    t.repeat.set(1/8,1/8);
+  });
+  enemyFire = new THREE.Group(); enemyFire.name='EnemyFire'; enemyFire.visible=false;
+  enemyFire.rotation.copy(FIRE_BONE_LOCAL_ROTATION);
+  enemyFire.scale.setScalar(FIRE_BONE_SCALE);
+
+  const sA=makeFireFlipbookMaterial(side,{intensity:1.55,alphaBoost:1.0});
+  const sB=makeFireFlipbookMaterial(side,{intensity:1.28,alphaBoost:0.78});
+  const iM=makeFireFlipbookMaterial(iso, {intensity:1.34,alphaBoost:0.82});
+  const tM=makeFireFlipbookMaterial(topTex,{intensity:1.42,alphaBoost:0.78});
+  enemyFireMats=[sA,sB,iM,tM];
+  addFirePlane(enemyFire,'ef-side-main',  1.55,2.65,sA,[0,1.18,0],[0,0,0],220);
+  addFirePlane(enemyFire,'ef-side-cross', 1.32,2.45,sB,[0,1.10,0],[0,Math.PI/2,0],221);
+  addFirePlane(enemyFire,'ef-iso-diag',   1.68,2.55,iM,[0,1.14,0],[0,Math.PI/4,0],222);
+  addFirePlane(enemyFire,'ef-top-length', 1.45,2.42,tM,[0,1.08,0],[0,-Math.PI/4,0],223);
+  scene.add(enemyFire);
+}
+
+function eProjectForward(){
+  eForward.addScaledVector(eRadial,-eForward.dot(eRadial)).normalize();
+  eRight.crossVectors(eForward,eRadial).normalize();
+}
+
+function updateEnemyDragon(dt, t){
+  if(!enemyRoot) return;
+
+  // ── AI: track player using shortest arc on sphere ─────────────────────
+  const playerPos = dragonRoot.position.clone().normalize(); // direction on sphere
+  const enemyPos  = eRadial.clone();
+
+  // Shortest arc: rotate eForward toward player direction, projected to tangent plane
+  const toPlayer = playerPos.clone().addScaledVector(enemyPos, -playerPos.dot(enemyPos)).normalize();
+  const dotFwd   = eForward.dot(toPlayer);
+  const crossY   = new THREE.Vector3().crossVectors(eForward, toPlayer).dot(eRadial);
+
+  // Turn rate — how fast enemy steers toward player
+  const turnRate = 0.8 + eSpeed*4.0;
+  const turnSign = crossY > 0 ? 1 : -1;
+  const turnAmt  = Math.min(Math.abs(crossY)*turnRate, turnRate)*dt * turnSign;
+  eForward.applyAxisAngle(eRadial, turnAmt);
+  eProjectForward();
+
+  // ── Altitude: aim fire cone at player ────────────────────────────────
+  // Compute where the player is relative to enemy mouth in the radial direction.
+  // Enemy needs to be at an altitude so that the vertical angle to player
+  // falls within FIRE_CONE_ANGLE. We bias toward being slightly ABOVE the player
+  // so the cone naturally sweeps down onto them.
+  const playerAlt  = altitude;
+  const altError   = playerAlt - eAltitude;  // +ve means player is above us
+  // Aim to sit at player altitude + slight upward bias so cone points down at them
+  const altTarget  = playerAlt + 0.05;
+  const altDiff    = altTarget - eAltitude;
+  eAltitude = clamp(eAltitude + altDiff * dt * 1.8, minAlt, maxAlt);
+
+  // ── Move forward at constant speed ────────────────────────────────────
+  eRadial.addScaledVector(eForward, eSpeed*dt).normalize();
+  eProjectForward();
+  enemyRoot.position.copy(eRadial.clone().multiplyScalar(earthR + eAltitude));
+
+  // ── Orient enemy mesh ─────────────────────────────────────────────────
+  const em = new THREE.Matrix4().makeBasis(eRight.clone().negate(), eRadial, eForward);
+  enemyRoot.quaternion.setFromRotationMatrix(em);
+
+  if(enemyMixer) enemyMixer.update(dt);
+
+  // ── Distance and angle to player ──────────────────────────────────────
+  const distToPlayer = enemyRoot.position.distanceTo(dragonRoot.position);
+
+  // Direction from enemy mouth toward player
+  const eMouthPos = enemyRoot.position.clone()
+    .addScaledVector(eForward, 0.32)
+    .addScaledVector(eRadial,  0.34);
+  const toPlayerWorld = dragonRoot.position.clone().sub(eMouthPos).normalize();
+  const angleToPlayer = Math.acos(clamp(eForward.dot(toPlayerWorld), -1, 1));
+
+  // ── AI fire decision ──────────────────────────────────────────────────
+  eFireTimer -= dt;
+  if(eFireTimer <= 0 && enemyFireMeter > 10 && distToPlayer < FIRE_CONE_RANGE * 1.2 && angleToPlayer < FIRE_CONE_ANGLE * 1.5){
+    eIsFiring    = true;
+    eFireDuration= 1.5 + Math.random()*1.5;
+    eFireTimer   = 4.0 + Math.random()*4.0;
+  }
+  if(eIsFiring){
+    eFireDuration -= dt;
+    if(eFireDuration <= 0 || enemyFireMeter <= 0) eIsFiring = false;
+  }
+
+  // ── Enemy fire meter — identical drain/refill rules as player ──────────
+  if(eIsFiring && enemyFireMeter > 0){
+    enemyFireMeter = Math.max(0, enemyFireMeter - FIRE_DRAIN_RATE*dt);
+    eFireLastUsed = t;
+    if(enemyFireMeter <= 0) eIsFiring = false;
+  } else if(t - eFireLastUsed > FIRE_REFILL_DELAY){
+    enemyFireMeter = Math.min(100, enemyFireMeter + FIRE_REFILL_RATE*dt);
+  }
+
+  // ── Update enemy fire breath (same as player) ─────────────────────────
+  const visTarget = eIsFiring ? 1.0 : 0.0;
+  let anyFireVisible = false;
+  const fps=26, offsets=[0,13,29,7];
+  for(let i=0;i<enemyFireMats.length;i++){
+    const m=enemyFireMats[i];
+    m.uniforms.frame.value = Math.floor(t*fps+offsets[i])%64;
+    m.uniforms.time.value  = t;
+    m.uniforms.wind.value  = 0.10+0.04*Math.sin(t*2.1);
+    const cur = m.uniforms.visibility.value;
+    m.uniforms.visibility.value = cur + (visTarget-cur)*0.36;
+    if(m.uniforms.visibility.value > 0.02) anyFireVisible=true;
+  }
+  if(enemyFire){
+    enemyFire.visible = anyFireVisible;
+    if(enemyMouthBone){
+      enemyMouthBone.updateWorldMatrix(true,false);
+      enemyMouthBone.getWorldPosition(enemyFireWorldPos);
+      enemyMouthBone.getWorldQuaternion(enemyFireWorldQuat);
+      const offset = FIRE_BONE_LOCAL_OFFSET.clone().applyQuaternion(enemyFireWorldQuat);
+      enemyFire.position.copy(enemyFireWorldPos).add(offset);
+      enemyFire.quaternion.copy(enemyFireWorldQuat).multiply(_fireLocalRotQuat);
+      enemyFire.scale.setScalar(FIRE_BONE_SCALE);
+    }
+  }
+
+  // ── Fire cone visual — wraps the actual fire mesh exactly ──────────────
+  if(enemyFireCone){
+    enemyFireCone.visible = eIsFiring;
+    if(eIsFiring && enemyFire){
+      // Use the EXACT same world position and direction as the visual fire flipbook
+      enemyFireCone.position.copy(enemyFire.position);
+      const eFireFwd = new THREE.Vector3(0,1,0).applyQuaternion(enemyFire.quaternion).normalize();
+      enemyFireCone.quaternion.setFromUnitVectors(new THREE.Vector3(0,-1,0), eFireFwd);
+      enemyFireCone.material.opacity = 0.18 + 0.12*Math.sin(t*12);
+      enemyFireCone.userData.fireFwd = eFireFwd; // cache for damage check
+    }
+  }
+
+  // ── Damage: enemy fire cone vs player capsule spheres ───────────────────
+  if(eIsFiring && enemyFire){
+    const eMouthPos2 = enemyFire.position.clone(); // exact fire mesh origin
+    const eFireDir = (enemyFireCone && enemyFireCone.userData.fireFwd) ? enemyFireCone.userData.fireFwd : eForward;
+    let hit = false;
+    if(playerCapsuleBones){
+      const pSpheres = getDragonCapsuleSpheres(playerCapsuleBones, dragonRoot, _playerCapsuleScratch);
+      for(let i=0;i<pSpheres.length;i++){
+        if(coneHitsSphere(eMouthPos2, eFireDir, FIRE_CONE_ANGLE, FIRE_CONE_LEN, pSpheres[i].center, pSpheres[i].radius)){ hit=true; break; }
+      }
+    }
+    if(!hit && playerWingBones){
+      const pWings = getWingCapsuleSpheres(playerWingBones, _playerWingScratch);
+      for(let i=0;i<pWings.length;i++){
+        if(coneHitsSphere(eMouthPos2, eFireDir, FIRE_CONE_ANGLE, FIRE_CONE_LEN, pWings[i].center, pWings[i].radius)){ hit=true; break; }
+      }
+    }
+    if(hit){
+      playerHP = Math.max(0, playerHP - 5.0 * dt);
+    }
+  }
+
+  // ── Dragon–dragon collision: push apart if overlapping ───────────────
+  // Full-capsule version: tests every body/tail/head/wing sphere of one dragon
+  // against every sphere of the other (see findDeepestDragonOverlap), so wings
+  // pushing apart side-by-side dragons is handled the same as bodies colliding
+  // head-on — the old version only ever compared root-to-root distance, which
+  // missed wingtip overlap entirely (wings reach ~0.44 units from root, well
+  // past the old 0.65 root-distance threshold once you account for both dragons'
+  // wings extending toward each other). distToPlayer gates a cheap early-out:
+  // skip the full sweep unless the dragons are even plausibly close enough for
+  // any sphere pair to reach (DRAGON_OVERLAP_CHECK_DIST, derived from the
+  // largest real sphere reach on the mesh).
+  if(distToPlayer < DRAGON_OVERLAP_CHECK_DIST){
+    const overlap = findDeepestDragonOverlap(
+      dragonRoot, playerCapsuleBones, playerWingBones,
+      enemyRoot, enemyCapsuleBones, enemyWingBones
+    );
+    if(overlap){
+      // Push vector: from the overlapping enemy sphere toward the overlapping
+      // player sphere (not root-to-root), so the push direction matches whichever
+      // body part — wing, body, or tail — is actually intersecting.
+      const pushDir = overlap.centerA.clone().sub(overlap.centerB).normalize();
+      const pushAmt = overlap.depth * 0.5; // split push equally
+
+      // Push player away along sphere surface (project onto tangent plane)
+      const playerPush = pushDir.clone().addScaledVector(radial, -pushDir.dot(radial)).normalize();
+      radial.addScaledVector(playerPush, pushAmt * 0.8).normalize();
+      projectForward();
+      dragonRoot.position.copy(radial.clone().multiplyScalar(earthR + altitude));
+
+      // Push enemy the opposite way
+      const enemyPush = pushDir.clone().negate().addScaledVector(eRadial, -pushDir.dot(eRadial)).normalize();
+      eRadial.addScaledVector(enemyPush, pushAmt * 0.8).normalize();
+      eProjectForward();
+      enemyRoot.position.copy(eRadial.clone().multiplyScalar(earthR + eAltitude));
+    }
+  }
+
+  // ── Enemy death: reset when HP reaches 0 ────────────────────────────
+  if(enemyHP <= 0){
+    enemyHP = 100;
+    enemyFireMeter = 100;
+    // Respawn enemy on opposite side of globe
+    eRadial.copy(radial).negate().normalize();
+    eForward.set(Math.random()-0.5, Math.random()-0.5, Math.random()-0.5)
+            .addScaledVector(eRadial,-eForward.dot(eRadial)).normalize();
+    eProjectForward();
+    enemyRoot.position.copy(eRadial.clone().multiplyScalar(earthR + eAltitude));
+    const flash = document.getElementById('lightningFlash');
+    if(flash){ flash.style.background='#ff0'; flash.style.opacity='0.25'; }
+    setTimeout(()=>{ if(flash) flash.style.opacity='0'; }, 500);
+    status('Enemy dragon defeated — respawning...');
+  }
+
+  // ── HUD ───────────────────────────────────────────────────────────────
+  const enemyHudEl = document.getElementById('enemyIndicator');
+  if(enemyHudEl){
+    const dist = Math.round(distToPlayer*100)/100;
+    enemyHudEl.style.display = 'block';
+    enemyHudEl.textContent   = (eIsFiring?'🔥':'🔴')+' ENEMY  dist:'+dist.toFixed(1);
+    enemyHudEl.style.color   = distToPlayer < 2.0 ? '#f44' : '#f88';
+  }
+}
+
+// ── Player fire meter and HP update ──────────────────────────────────────
+// ── Canvas overlay for floating bars ─────────────────────────────────────
+const _statCanvas = document.getElementById('statCanvas');
+const _statCtx    = _statCanvas ? _statCanvas.getContext('2d') : null;
+
+// Project 3D world position to screen pixel coords
+function worldToScreen(pos){
+  const v = pos.clone().project(camera);
+  return {
+    x: (v.x * 0.5 + 0.5) * window.innerWidth,
+    y: (-(v.y) * 0.5 + 0.5) * window.innerHeight,
+    z: v.z,   // -1..1, >1 = behind camera
+  };
+}
+
+function drawFloatingBar(ctx, sx, sy, pct, color, bgColor, w, h){
+  const r = h / 2; // fully pill-shaped
+  const x = sx - w/2;
+
+  // Outer shadow/border
+  ctx.save();
+  ctx.shadowColor = 'rgba(0,0,0,0.7)';
+  ctx.shadowBlur  = 4;
+  ctx.fillStyle   = 'rgba(0,0,0,0.65)';
+  _roundRect(ctx, x-1, sy-1, w+2, h+2, r+1);
+  ctx.fill();
+  ctx.restore();
+
+  // Background track
+  ctx.fillStyle = bgColor;
+  _roundRect(ctx, x, sy, w, h, r);
+  ctx.fill();
+
+  // Fill (clipped to pill shape so it can't overflow corners)
+  if(pct > 0){
+    ctx.save();
+    ctx.beginPath();
+    _roundRect(ctx, x, sy, w, h, r);
+    ctx.clip();
+    ctx.fillStyle = color;
+    ctx.fillRect(x, sy, w*(pct/100), h);
+    ctx.restore();
+  }
+}
+
+// Cross-browser rounded rect helper (ctx.roundRect not available everywhere)
+function _roundRect(ctx, x, y, w, h, r){
+  r = Math.min(r, w/2, h/2);
+  ctx.beginPath();
+  ctx.moveTo(x+r, y);
+  ctx.lineTo(x+w-r, y);
+  ctx.arcTo(x+w, y,   x+w, y+r,   r);
+  ctx.lineTo(x+w, y+h-r);
+  ctx.arcTo(x+w, y+h, x+w-r, y+h, r);
+  ctx.lineTo(x+r, y+h);
+  ctx.arcTo(x, y+h, x, y+h-r, r);
+  ctx.lineTo(x, y+r);
+  ctx.arcTo(x, y,   x+r, y,   r);
+  ctx.closePath();
+}
+
+function updatePlayerStats(dt, t){
+  // ── Fire meter logic ──────────────────────────────────────────────────
+  if(keys.space && playerFire > 0){
+    playerFire = Math.max(0, playerFire - FIRE_DRAIN_RATE*dt);
+    fireLastUsed = t;
+    if(playerFire <= 0) keys.space = false;
+  } else if(t - fireLastUsed > FIRE_REFILL_DELAY){
+    playerFire = Math.min(100, playerFire + FIRE_REFILL_RATE*dt);
+  }
+
+  // ── Death ─────────────────────────────────────────────────────────────
+  if(playerHP <= 0){
+    const flash = document.getElementById('lightningFlash');
+    if(flash){ flash.style.background='#f00'; flash.style.opacity='0.5'; }
+    setTimeout(()=>{ if(flash) flash.style.opacity='0'; }, 800);
+    playerHP = 100;
+    playerFire = 100;
+    resetFlight();
+  }
+
+  // ── Canvas floating bars ──────────────────────────────────────────────
+  if(!_statCtx) return;
+  _statCanvas.width  = window.innerWidth;
+  _statCanvas.height = window.innerHeight;
+  _statCtx.clearRect(0, 0, _statCanvas.width, _statCanvas.height);
+
+  const BAR_W = 56, BAR_H = 5, GAP = 3, LIFT = 28;
+
+  // Player bars — above dragonRoot projected to screen
+  if(dragonRoot){
+    const abovePlayer = dragonRoot.position.clone()
+      .addScaledVector(radial, 0.55);
+    const sp = worldToScreen(abovePlayer);
+    if(sp.z < 1.0){
+      // HP bar (green→yellow→red)
+      const hpCol = playerHP > 50 ? '#4ef04e' : playerHP > 25 ? '#ffd740' : '#f44336';
+      drawFloatingBar(_statCtx, sp.x, sp.y - LIFT,        playerHP,   hpCol,   '#1a1a1a', BAR_W, BAR_H);
+      // Fire bar (orange)
+      drawFloatingBar(_statCtx, sp.x, sp.y - LIFT + GAP + BAR_H, playerFire, '#ff9800', '#1a1a1a', BAR_W, BAR_H);
+    }
+  }
+
+  // Enemy bars — above enemyRoot
+  if(enemyRoot && enemyVisual){
+    const aboveEnemy = enemyRoot.position.clone()
+      .addScaledVector(eRadial, 0.55);
+    const se = worldToScreen(aboveEnemy);
+    if(se.z < 1.0){
+      // Same colour logic as player HP
+      const eHpCol = enemyHP > 50 ? '#4ef04e' : enemyHP > 25 ? '#ffd740' : '#f44336';
+      drawFloatingBar(_statCtx, se.x, se.y - LIFT, enemyHP, eHpCol, '#1a1a1a', BAR_W, BAR_H);
+      // Fire bar
+      const eFirePct = enemyFireMeter;
+      drawFloatingBar(_statCtx, se.x, se.y - LIFT + GAP + BAR_H, eFirePct, '#ff6600', '#1a1a1a', BAR_W, BAR_H);
+    }
+  }
+
+  // ── Enemy indicator pill ───────────────────────────────────────────────
+  const enemyHudEl = document.getElementById('enemyIndicator');
+  if(enemyHudEl && enemyRoot){
+    const dist = dragonRoot ? dragonRoot.position.distanceTo(enemyRoot.position) : 0;
+    enemyHudEl.style.display = 'block';
+    enemyHudEl.textContent   = (eIsFiring?'🔥':'🔴')+' '+dist.toFixed(1)+'u';
+  }
+}
+
 function animate(){
   requestAnimationFrame(animate); const dt=Math.min(clock.getDelta(),.04), t=clock.elapsedTime;
   if(earthMat){earthMat.uniforms.time.value=t;earthMat.uniforms.detailBoost.value=clamp(1.15-(altitude-.30)/1.45,0.0,1.15);} scene.traverse(o=>{if(o.userData&&o.userData.isWaterShell)o.material.uniforms.time.value=t});
   if(mixer)mixer.update(dt); updateFlight(dt);
   if(earthMat){earthMat.uniforms.dragonGroundDir.value.copy(radial); earthMat.uniforms.dragonShimmerStrength.value=clamp(0.70-altitude*.18,0.22,0.62); earthMat.uniforms.dragonShadowStrength.value=clamp(0.86-altitude*.22,0.28,0.74);}
-  updateShadow(t); updateFireBreath(t); updateDolphins(dt,t); updateClouds(t); updateCloudCollision(dt); updateCloudRegrowth(dt); updateWeather(dt,t); updateCamera(dt);
+  updateShadow(t); updateFireBreath(dt,t); updateNeckLook(); updateEnemyDragon(dt,t); updatePlayerStats(dt,t); updateDolphins(dt,t); updateClouds(t); updateCloudCollision(dt); updateCloudRegrowth(dt); updateWeather(dt,t); updateCamera(dt);
   // Phase 2: keep debug bsphere meshes in sync with drifting clouds
   if(collisionDebug&&debugRoot){
+    // Compute both capsule and wing spheres once per frame here (independent of
+    // whether fire is active) so the debug view stays accurate even when not
+    // firing. getDragonCapsuleSpheres live-tracks real spine/tail/neck bones, so
+    // this correctly reflects the flying animation the same way the rendered
+    // mesh does (not just rigid root rotation — see DRAGON_CAPSULE's comment).
+    const debugCapsuleSpheres = playerCapsuleBones ? getDragonCapsuleSpheres(playerCapsuleBones, dragonRoot, _playerCapsuleScratch) : null;
+    const debugWingSpheres = playerWingBones ? getWingCapsuleSpheres(playerWingBones, _playerWingScratch) : null;
     debugRoot.children.forEach(m=>{
       if(m.userData.isBSphere&&m.userData.bsRef){
         m.position.copy(m.userData.bsRef.currentCenter);
-      } else if(dragonRoot){
-        if(m.userData.isDragonBody){
-          // Body — lifted up along radial to sit on the torso
-          m.position.copy(dragonRoot.position)
-            .addScaledVector(radial, 0.20);
-        } else if(m.userData.isDragonHead){
-          // Head — forward and well above root pivot
-          m.position.copy(dragonRoot.position)
-            .addScaledVector(forward, 0.32)
-            .addScaledVector(radial, 0.24);
-        } else if(m.userData.isDragonTail){
-          // Tail — backward and slightly raised
-          m.position.copy(dragonRoot.position)
-            .addScaledVector(forward, -0.28)
-            .addScaledVector(radial, 0.12);
-        }
+      } else if(m.userData.isDragonCapsuleSphere && debugCapsuleSpheres && debugCapsuleSpheres[m.userData.capsuleIdx]){
+        m.position.copy(debugCapsuleSpheres[m.userData.capsuleIdx].center);
+      } else if(m.userData.isWingCapsuleSphere && debugWingSpheres && debugWingSpheres[m.userData.wingIdx]){
+        m.position.copy(debugWingSpheres[m.userData.wingIdx].center);
       }
     });
   }
