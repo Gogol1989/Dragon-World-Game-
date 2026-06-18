@@ -27,7 +27,7 @@
   <p>Clean rebuilt renderer: separate land/ocean/color/topography/coast/foam layers, flat oceans with bathymetry color, smoothed continents, visible softened elevations, and true Three.js mesh shadow: animated wing flaps cast onto a tangent receiver.</p>
   <button id="go">TAKE FLIGHT</button>
 </div>
-<div id="hud"><div class="pill" id="speedH">Speed</div><div class="pill" id="altH">Altitude</div><div class="pill" id="cloudH">☁ Clear</div><div class="pill" id="weatherH" style="display:none">🌧</div><div class="pill" id="snowH" style="display:none">❄</div><div class="pill" id="locH">SebLague-style Earth</div></div>
+<div id="hud"><div class="pill" id="speedH">Speed</div><div class="pill" id="altH">Altitude</div><div class="pill" id="cloudH">☁ Clear</div><div class="pill" id="weatherH" style="display:none">🌧</div><div class="pill" id="snowH" style="display:none">❄</div><div class="pill" id="locH">SebLague-style Earth</div><div class="pill" id="musicH" style="cursor:pointer;user-select:none">♪ Music: ON</div><div class="pill" id="sfxH" style="cursor:pointer;user-select:none">🔊 SFX: ON</div><div class="pill" id="modeH" style="cursor:pointer;user-select:none">🧭 Explore</div><div class="pill" id="aiDebugH" style="display:none">AI debug</div></div>
 <div id="cloudFog"></div>
 <div id="lightningFlash"></div>
 <!-- Floating bars rendered in CSS above each dragon via updatePlayerStats positioning -->
@@ -69,6 +69,22 @@ const ASSET = {
   fireIso:'./assets/TorchFire-isometric.png',
   fireTop:'./assets/TorchFire-top.png',
   dolphin:'./assets/dolphin.glb',
+  music:'./assets/background-music.mp3',
+  ambMountain:'./assets/mountain-wind.mp3',
+  ambBlizzard:'./assets/blizzard.mp3',
+  ambForest:'./assets/forest.mp3',
+  ambIsland:'./assets/island.mp3',
+  sfxRainThunder:'./assets/rain_and_thunder.mp3',
+  sfxSnowfall:'./assets/snowfall.mp3',
+  sfxDolphin:'./assets/dolphin.mp3',
+  sfxCloudPoof:'./assets/cloud_poof.mp3',
+  combatMusic:'./assets/combat_bg.mp3',
+  sfxDragonRoar:'./assets/dragon_roar1.mp3',
+  sfxDragonFire:'./assets/dragon_fire1.mp3',
+  sfxFireHit:'./assets/fire_hit1.mp3',
+  sfxDragonHurt:'./assets/dragon_hurt1.mp3',
+  sfxDragonDeath:'./assets/dragon_death.mp3',
+  sfxVictoryRoar:'./assets/victory_roar.mp3',
   foamSplash:'./assets/foam_splash.png',
   rippleHeight:'./assets/ripple_height.png',
   rippleNormal:'./assets/ripple_normal.png',
@@ -78,13 +94,576 @@ const ASSET = {
 };
 const canvas=document.getElementById('c'), statusEl=document.getElementById('status');
 let scene,camera,renderer,clock,earth,earthMat,dragonRoot,dragonVisual,mixer,flyAction,shadowGroup,shadowWingL,shadowWingR,shadowBody,shadowTail,shadowPlane,shadowLight,shadowTarget;
+// The dragon GLB is loaded exactly once (by loadDragon) and kept here as a template;
+// the enemy dragon clones this via SkeletonUtils.clone() instead of re-fetching and
+// re-decoding the same 33MB file a second time. dragonTemplateCallbacks holds any
+// functions waiting for the template to become ready, since loadDragon's fetch is
+// async and initEnemyDragon() runs synchronously right after it's kicked off (so
+// the template usually isn't ready yet at that point).
+let dragonTemplate=null, dragonTemplateAnimations=null;
+const dragonTemplateCallbacks=[];
+function onDragonTemplateReady(cb){
+  if(dragonTemplate) cb(dragonTemplate, dragonTemplateAnimations);
+  else dragonTemplateCallbacks.push(cb);
+}
 let fireBreath=null, fireMats=[], fireTopPlane=null, fireGlow=null, mouthBone=null, fireActive=false;
+// Background music — plain HTMLAudioElement is enough for a single looping track
+// (no mixing/effects needed), and is simpler and more robust than a Web Audio
+// graph for this use case. musicOn reflects user intent (toggle state) separately
+// from whether playback is technically active, so the toggle can be flipped before
+// the track is even created (e.g. if someone clicks the pill before TAKE FLIGHT).
+let bgMusic=null, musicOn=true;
+let sfxOn=true; // controls biome ambience + proximity sounds (storm/snow/dolphin) + cloud poof — independent from musicOn
+function initMusic(){
+  if(bgMusic) return;
+  bgMusic=new Audio(ASSET.music);
+  bgMusic.loop=true;
+  bgMusic.volume=0.35;
+}
+function playMusic(){
+  initMusic();
+  if(!musicOn) return;
+  // play() returns a Promise that rejects if the browser blocks autoplay; this is
+  // only ever called from a real click handler (TAKE FLIGHT / the toggle pill), so
+  // it should be allowed, but the catch avoids an unhandled-rejection console error
+  // on browsers/timing edge cases where it's blocked anyway.
+  bgMusic.play().catch(()=>{});
+}
+function toggleMusic(){
+  musicOn=!musicOn;
+  if(gameMode==='defend'){
+    initCombatMusic();
+    if(musicOn) combatMusic.play().catch(()=>{});
+    else combatMusic.pause();
+  } else {
+    initMusic();
+    if(musicOn) bgMusic.play().catch(()=>{});
+    else bgMusic.pause();
+  }
+  const el=document.getElementById('musicH');
+  if(el) el.textContent='♪ Music: '+(musicOn?'ON':'OFF');
+  status('Music: '+(musicOn?'ON':'OFF'));
+}
+function toggleSfx(){
+  sfxOn=!sfxOn;
+  if(!sfxOn){
+    // Silence whatever biome ambience might currently be playing/fading —
+    // updateBiomeAudio() short-circuits while sfxOn is false, so without this
+    // an active biome track would otherwise be left audibly playing at whatever
+    // volume it last had.
+    if(_activeBiomeId){
+      const biome = BIOMES.find(b=>b.id===_activeBiomeId);
+      if(biome) getBiomeAudio(biome).pause();
+    }
+    if(_fadingBiomeId){
+      const biome = BIOMES.find(b=>b.id===_fadingBiomeId);
+      if(biome) getBiomeAudio(biome).pause();
+    }
+    _activeBiomeId=null; _fadingBiomeId=null; _biomeFadeDir=0; _biomeFadeT=0;
+    _biomeDwell.clear();
+    // Same for the independent proximity-sound layer (storm/snow/dolphin) —
+    // updateProximitySounds() also short-circuits while sfxOn is false.
+    for(const p of PROXIMITY_SOUNDS){
+      const a = _proximityAudio.get(p.id);
+      if(a) a.pause();
+    }
+    _proximityFade.clear();
+    // Cloud poof is a one-shot, fire-and-forget pool — nothing to pause here since
+    // playCloudPoof() already checks sfxOn before ever starting a new poof; any
+    // already-playing poof (sub-1-second) is left to finish naturally, same
+    // reasoning as why it was never force-stopped by the old single toggle either.
+    //
+    // Combat audio is different: dragon_death runs ~7 seconds and victory_roar/
+    // dragon_roar1 ~3.5 seconds — long enough that "let it finish naturally" would
+    // be a noticeable, audible inconsistency with the toggle just having been
+    // switched off, unlike the sub-1-second poof. Force-stop any in-progress
+    // combat one-shot, including the fire-breath sound.
+    for(const key in _combatOneShots){ _combatOneShots[key].pause(); }
+    if(_playerFireSound && !_playerFireSound.paused) _playerFireSound.pause();
+    if(_enemyFireSound && !_enemyFireSound.paused) _enemyFireSound.pause();
+  }
+  const el=document.getElementById('sfxH');
+  if(el) el.textContent='🔊 SFX: '+(sfxOn?'ON':'OFF');
+  status('Sound effects: '+(sfxOn?'ON':'OFF'));
+}
+
+// ── Biome ambience: crossfade background music to a looping ambient track when
+// the dragon dwells in a recognized biome for a while. ─────────────────────────
+// Architecture: each biome is { id, asset, detect(radial)->bool }. detect() is
+// checked every frame against the dragon's current radial (normalized world
+// position on the globe). A simple dwell timer per biome accumulates while
+// detect() is true and decays (resets) as soon as it's false — "stays around a
+// region for a bit longer" means continuously inside the region, not cumulative
+// time sampled on and off. Once a biome's dwell timer crosses BIOME_DWELL_SECONDS,
+// its ambience track crossfades in while background music crossfades out (and
+// vice versa on exit). Only one biome can be "active" at a time — if two regions
+// somehow overlap, the first one whose dwell timer crosses the threshold wins;
+// the other's timer keeps accumulating but won't trigger a second simultaneous
+// crossfade.
+//
+// Polar/snow detection is pure latitude (radial.y on this Y-up sphere directly
+// gives sin(latitude), so no texture/mask lookup is needed — matches the existing
+// uvToDir()/dirToUV() latitude convention already used for cloud placement and
+// the dolphin spawn mask elsewhere in this file). POLAR_LAT_THRESHOLD=58° was
+// chosen to comfortably include all five named regions (Antarctica, upper
+// Russia, northern Europe, upper Canada, Greenland are all roughly 58°+ at their
+// southern edges) — note this will also include other similarly high-latitude
+// areas (Alaska, Siberia generally), which is the correct behavior for a
+// snow/blizzard ambience cue, not a bug: the goal is "this looks/feels like
+// polar terrain," not an exact match to five specific countries' borders.
+const BIOME_DWELL_SECONDS = 8;    // continuous time in-region before ambience kicks in
+const BIOME_FADE_SECONDS = 1.5;   // crossfade duration, both directions
+const POLAR_LAT_THRESHOLD = 58;   // degrees; |lat| beyond this counts as polar/snow
+
+// Converts a normalized direction on the sphere to {lat, lon} in degrees, using
+// the same axis convention as the rest of the file (Y-up, north pole at +Y).
+// IMPORTANT: atan2(rad.z, -rad.x) recovers the angle `a` used internally by
+// uvToDir() (a = u*2π), NOT longitude directly — uvToDir defines u via the
+// standard equirectangular convention lon = u*360-180, so converting a's degree
+// value straight into longitude without subtracting 180 is off by exactly 180°.
+// This was caught by round-tripping known (u,v) pairs through uvToDir() and back
+// through this function — verify any future change to this formula the same way,
+// it's easy to get subtly wrong in a way that still "looks like" a longitude.
+function radToLatLon(rad){
+  const latDeg = THREE.MathUtils.radToDeg(Math.asin(clamp(rad.y,-1,1)));
+  let aDeg = THREE.MathUtils.radToDeg(Math.atan2(rad.z,-rad.x));
+  if(aDeg<0) aDeg+=360;
+  let lonDeg = aDeg-180;
+  return {lat:latDeg, lon:lonDeg};
+}
+const MOUNTAIN_BRIGHTNESS_THRESHOLD = 62/255; // see conversation notes: verified against real-world peaks/flats in topo.jpg, sampleMask() returns 0..1
+const ISLAND_BOX = {latMin:-47, latMax:0, lonMin:110, lonMax:180}; // Australia, Tasmania, New Guinea, New Zealand + surrounding seas
+const FOREST_LAT_BAND = 10; // |lat| <= this counts as equatorial (any longitude); combined with a land-mask check below so it only fires over actual land (Amazon, Congo, etc.), not open equatorial ocean
+
+const BIOMES = [
+  {
+    id: 'polar',
+    asset: ASSET.ambBlizzard,
+    detect(rad){
+      const latDeg = THREE.MathUtils.radToDeg(Math.asin(clamp(rad.y,-1,1)));
+      return Math.abs(latDeg) > POLAR_LAT_THRESHOLD;
+    }
+  },
+  {
+    // Checked BEFORE mountain so New Guinea (which is both mountainous AND in
+    // this box) resolves to island/Australia ambience, not mountain wind — an
+    // explicit design decision, not an oversight.
+    id: 'island',
+    asset: ASSET.ambIsland,
+    detect(rad){
+      const {lat,lon} = radToLatLon(rad);
+      return lat>=ISLAND_BOX.latMin && lat<=ISLAND_BOX.latMax && lon>=ISLAND_BOX.lonMin && lon<=ISLAND_BOX.lonMax;
+    }
+  },
+  {
+    id: 'forest',
+    asset: ASSET.ambForest,
+    detect(rad){
+      const latDeg = THREE.MathUtils.radToDeg(Math.asin(clamp(rad.y,-1,1)));
+      if(Math.abs(latDeg) > FOREST_LAT_BAND) return false;
+      if(!landCtx||!landCanvas) return false; // land mask hasn't finished loading yet
+      return sampleMask(landCtx, landCanvas, rad) > 0.5; // land mask is a clean black/white binary image
+    }
+  },
+  {
+    id: 'mountain',
+    asset: ASSET.ambMountain,
+    detect(rad){
+      if(!topoCtx||!topoCanvas) return false; // topo.jpg hasn't finished loading yet
+      return sampleMask(topoCtx, topoCanvas, rad) > MOUNTAIN_BRIGHTNESS_THRESHOLD;
+    }
+  },
+];
+
+// Per-biome dwell timers, audio elements, and which biome (if any) is currently
+// faded in. Built lazily so Audio objects aren't constructed before they're
+// needed (consistent with bgMusic's own lazy initMusic() pattern).
+const _biomeDwell = new Map();   // id -> seconds currently dwelling
+const _biomeAudio = new Map();   // id -> HTMLAudioElement
+let _activeBiomeId = null;       // which biome's ambience is currently faded in (or null)
+let _fadingBiomeId = null;       // biome whose track is mid fade-out (kept until fade completes, since _activeBiomeId is cleared immediately on exit but we still need to know which Audio element to ramp down)
+let _biomeFadeT = 0;             // 0..1 progress of the current crossfade
+let _biomeFadeDir = 0;           // +1 fading in to a biome, -1 fading out back to music, 0 idle
+
+function getBiomeAudio(biome){
+  let a = _biomeAudio.get(biome.id);
+  if(!a){
+    a = new Audio(biome.asset);
+    a.loop = true;
+    a.volume = 0;
+    _biomeAudio.set(biome.id, a);
+  }
+  return a;
+}
+
+function updateBiomeAudio(dt){
+  if(!sfxOn || gameMode!=='explore') return; // biome ambience is explorer-only; Defend mode has its own separate combat SFX
+  // Update dwell timers: accumulate while inside, reset instantly on exit. Find
+  // the first biome (in BIOMES order) whose dwell has crossed the threshold —
+  // that's the one we want active. If none qualify, target is "no biome" (plain
+  // background music).
+  let target = null;
+  for(const biome of BIOMES){
+    const inside = biome.detect(radial);
+    const prev = _biomeDwell.get(biome.id) || 0;
+    const next = inside ? prev + dt : 0;
+    _biomeDwell.set(biome.id, next);
+    if(target===null && next >= BIOME_DWELL_SECONDS) target = biome.id;
+  }
+
+  if(target !== _activeBiomeId){
+    if(_activeBiomeId) _fadingBiomeId = _activeBiomeId; // remember what we're fading OUT of
+    _activeBiomeId = target;
+    _biomeFadeDir = target ? 1 : -1;
+    _biomeFadeT = 0;
+    if(target){
+      const biome = BIOMES.find(b=>b.id===target);
+      const a = getBiomeAudio(biome);
+      a.volume = 0;
+      a.play().catch(()=>{});
+    }
+  }
+
+  if(_biomeFadeDir !== 0){
+    _biomeFadeT = Math.min(1, _biomeFadeT + dt/BIOME_FADE_SECONDS);
+    const k = _biomeFadeT; // linear crossfade is plenty for ambient wind/snow loops
+    if(_biomeFadeDir > 0){
+      // Fading INTO a biome: that biome's ambience ramps up. What ramps down
+      // depends on what we came from — either background music (the common case,
+      // entering a biome from "no biome") or the PREVIOUS biome's own track, if
+      // this is a direct biome-to-biome transition (e.g. polar straight into a
+      // future mountain region with no gap between). Without this distinction,
+      // a direct transition would leave the old biome's track stuck at its last
+      // volume AND cause an unintended blip in background music, which was never
+      // actually playing into this transition.
+      const biome = BIOMES.find(b=>b.id===_activeBiomeId);
+      if(biome) getBiomeAudio(biome).volume = 0.45*k;
+      if(_fadingBiomeId){
+        const prevBiome = BIOMES.find(b=>b.id===_fadingBiomeId);
+        if(prevBiome) getBiomeAudio(prevBiome).volume = 0.45*(1-k);
+      } else if(bgMusic){
+        bgMusic.volume = 0.35*(1-k);
+      }
+    } else {
+      // Fading OUT of the biome we just left, back to background music (only
+      // reachable when target is null, i.e. no biome is taking over).
+      const biome = BIOMES.find(b=>b.id===_fadingBiomeId);
+      if(biome) getBiomeAudio(biome).volume = 0.45*(1-k);
+      if(bgMusic) bgMusic.volume = 0.35*k;
+    }
+    if(_biomeFadeT>=1){
+      _biomeFadeDir = 0;
+      if(_fadingBiomeId){
+        // Fully silent now — pause rather than leave playing forever, so an
+        // unbounded number of future biomes don't each cost an idle decode loop.
+        const biome = BIOMES.find(b=>b.id===_fadingBiomeId);
+        if(biome) getBiomeAudio(biome).pause();
+        _fadingBiomeId = null;
+      }
+    }
+  }
+}
+
+// ── Proximity sound layer: storm, snowfall, dolphin ─────────────────────────
+// Unlike BIOMES (one dwell-gated track replaces background music), these are
+// independent layers that fade in/out on top of whatever music is currently
+// playing, based on instantaneous distance, not a dwell timer — flying near a
+// storm cloud should start rumbling almost immediately, not after a 25s wait.
+// Each channel tracks its own fade progress so multiple proximity sounds (e.g.
+// a storm AND a snow cloud both nearby) can play simultaneously without
+// interfering with each other or with the music/biome slot.
+const PROXIMITY_FADE_SECONDS = 1.0; // faster than biome crossfades — proximity is instantaneous, not a "settling in" feeling
+const PROXIMITY_MAX_VOLUME = { storm:0.5, snow:0.4, dolphin:0.55 };
+const CLOUD_PROXIMITY_MARGIN = 0.35; // extra distance beyond the bank's own bounding radius that still counts as "near"
+const DOLPHIN_PROXIMITY_DIST = 0.9;  // dolphins have no bounding radius of their own, so this is a flat distance
+
+function nearAnyBank(bankSet){
+  for(const bi of bankSet){
+    const bs = CLOUD_BSPHERES[bi];
+    if(!bs) continue;
+    if(dragonRoot.position.distanceTo(bs.currentCenter) < bs.radius + CLOUD_PROXIMITY_MARGIN) return true;
+  }
+  return false;
+}
+function nearAnyDolphin(){
+  for(const d of dolphins){
+    if(!d.root.userData.active || !d.root.visible) continue; // skip submerged/idle pool slots, see beginDolphinJump
+    if(dragonRoot.position.distanceTo(d.root.position) < DOLPHIN_PROXIMITY_DIST) return true;
+  }
+  return false;
+}
+
+const PROXIMITY_SOUNDS = [
+  { id:'storm',   asset:ASSET.sfxRainThunder, detect:()=>nearAnyBank(_stormBanks) },
+  { id:'snow',    asset:ASSET.sfxSnowfall,    detect:()=>nearAnyBank(_snowBanks)  },
+  { id:'dolphin', asset:ASSET.sfxDolphin,     detect:nearAnyDolphin },
+];
+
+const _proximityAudio = new Map(); // id -> HTMLAudioElement
+const _proximityFade  = new Map(); // id -> {dir:+1/-1/0, t:0..1}
+
+function getProximityAudio(p){
+  let a = _proximityAudio.get(p.id);
+  if(!a){
+    a = new Audio(p.asset);
+    a.loop = true;
+    a.volume = 0;
+    _proximityAudio.set(p.id, a);
+  }
+  return a;
+}
+
+function updateProximitySounds(dt){
+  if(!sfxOn || gameMode!=='explore') return; // proximity sounds are explorer-only; Defend mode has its own separate combat SFX
+  for(const p of PROXIMITY_SOUNDS){
+    const inside = p.detect();
+    let fade = _proximityFade.get(p.id);
+    if(!fade){ fade = {dir:0, t: inside?1:0}; _proximityFade.set(p.id, fade); }
+    const wantDir = inside ? 1 : -1;
+    if(fade.dir === 0 && ((inside && fade.t<1) || (!inside && fade.t>0))) fade.dir = wantDir;
+    else if(inside && fade.dir<0) fade.dir = 1;       // re-entered while fading out — reverse immediately
+    else if(!inside && fade.dir>0) fade.dir = -1;     // left while fading in — reverse immediately
+
+    if(fade.dir === 0) continue;
+    const a = getProximityAudio(p);
+    if(fade.dir>0 && a.paused) a.play().catch(()=>{});
+    fade.t = clamp(fade.t + fade.dir*dt/PROXIMITY_FADE_SECONDS, 0, 1);
+    a.volume = PROXIMITY_MAX_VOLUME[p.id] * fade.t;
+    if(fade.t<=0 && fade.dir<0){ a.pause(); fade.dir=0; }
+    if(fade.t>=1 && fade.dir>0){ fade.dir=0; }
+  }
+}
+
+// ── One-shot SFX pool: cloud poof ────────────────────────────────────────────
+// Unlike the looping biome/proximity tracks above, a poof is a brief, fire-and-
+// forget sound that can legitimately overlap (flying through a dense cloud bank
+// can scatter several puffs within the same second). A small rotating pool of
+// reusable Audio elements avoids calling `new Audio()` once per puff forever
+// (which would leak elements over a long play session) while still allowing a
+// few overlapping poofs to sound natural rather than cutting each other off.
+const CLOUD_POOF_POOL_SIZE = 5;
+const CLOUD_POOF_VOLUME = 0.4;
+let _cloudPoofPool = null;
+let _cloudPoofNext = 0;
+function playCloudPoof(){
+  if(!sfxOn || gameMode!=='explore') return; // cloud poof is explorer-only; Defend mode has its own separate combat SFX
+  if(!_cloudPoofPool){
+    _cloudPoofPool = [];
+    for(let i=0;i<CLOUD_POOF_POOL_SIZE;i++){
+      const a = new Audio(ASSET.sfxCloudPoof);
+      a.volume = CLOUD_POOF_VOLUME;
+      _cloudPoofPool.push(a);
+    }
+  }
+  const a = _cloudPoofPool[_cloudPoofNext];
+  _cloudPoofNext = (_cloudPoofNext+1) % _cloudPoofPool.length;
+  // Restart from the beginning even if this pool slot's previous poof is still
+  // finishing — currentTime reset + play() is the standard pattern for retriggering
+  // a short one-shot without waiting for the previous playback to fully end.
+  a.currentTime = 0;
+  a.play().catch(()=>{});
+}
+
+// ── Combat mode audio (Defend mode only) ────────────────────────────────────
+// combat_bg replaces background music entirely while in Defend mode (still
+// gated by musicOn, same toggle as explore-mode music — see setGameMode).
+// The 6 combat SFX are gated by sfxOn, same as every other SFX-category sound.
+let combatMusic=null;
+function initCombatMusic(){
+  if(combatMusic) return;
+  combatMusic=new Audio(ASSET.combatMusic);
+  combatMusic.loop=true;
+  combatMusic.volume=0.35;
+}
+
+// Fire-breath sound: plays once per press/fire-start (rising edge of each
+// dragon's firing state), not a continuous loop. The fire meter caps any single
+// continuous fire-breath at 2.5s (100/FIRE_DRAIN_RATE), shorter than the clip
+// itself (~3.08s), so a single play-through per trigger is always sufficient —
+// no need to retrigger or loop even for a maximum-length hold.
+let _playerFireSound=null, _enemyFireSound=null;
+let _playerWasFiring=false, _enemyWasFiring=false;
+function getPlayerFireSound(){
+  if(!_playerFireSound){ _playerFireSound=new Audio(ASSET.sfxDragonFire); _playerFireSound.volume=0.5; }
+  return _playerFireSound;
+}
+function getEnemyFireSound(){
+  if(!_enemyFireSound){ _enemyFireSound=new Audio(ASSET.sfxDragonFire); _enemyFireSound.volume=0.5; }
+  return _enemyFireSound;
+}
+// Called every frame with each dragon's live per-frame firing state — triggers
+// a fresh one-shot play on the false->true rising edge only, for each dragon
+// independently (so both can play layered if both start firing close together).
+// IMPORTANT: the player argument must be a genuinely live signal recomputed
+// every frame (e.g. keys.space && playerFire>0) — the old `fireActive` variable
+// elsewhere in this file is a one-way sticky flag that only ever flips false-
+// >true once and never resets, which silently broke this rising-edge check
+// after the first press ever (no real edge left to detect). Caught via user
+// report, traced via grep for every assignment to that variable.
+function updateCombatFireSounds(playerFiring, enemyFiring){
+  const inCombat = sfxOn && gameMode==='defend';
+  if(inCombat && playerFiring && !_playerWasFiring){
+    const p = getPlayerFireSound(); p.currentTime=0; p.play().catch(()=>{});
+  }
+  _playerWasFiring = inCombat && playerFiring;
+  if(inCombat && enemyFiring && !_enemyWasFiring){
+    const e = getEnemyFireSound(); e.currentTime=0; e.play().catch(()=>{});
+  }
+  _enemyWasFiring = inCombat && enemyFiring;
+}
+
+// One-shot combat SFX — reuses the same "small rotating pool" idea as cloud poof
+// isn't necessary here since these are rarer, deliberate events (not many-per-
+// second collisions), so a single Audio element per sound is enough; retriggering
+// resets currentTime the same way.
+const _combatOneShots = {};
+function playCombatSfx(assetPath, volume){
+  if(!sfxOn) return;
+  let a = _combatOneShots[assetPath];
+  if(!a){ a=new Audio(assetPath); a.volume=volume; _combatOneShots[assetPath]=a; }
+  a.currentTime = 0;
+  a.play().catch(()=>{});
+}
+// Applies a brief backward recoil + red emissive flash to a dragon's visual
+// mesh, used as the "got hit" visual feedback since the GLB has no dedicated
+// hurt animation. visual is dragonVisual/enemyVisual (a child of the root group,
+// not the root itself — the root's position/rotation is fully recomputed every
+// frame elsewhere, so offsetting it directly would just get overwritten; the
+// child transform is untouched by anything else and is safe to use here).
+function applyHitReaction(visual, hitTimer){
+  if(!visual) return;
+  if(hitTimer >= HIT_REACTION_DURATION){
+    // Effect finished — make sure we're cleanly reset rather than relying on
+    // the math below to land exactly on zero (floating point, plus this also
+    // covers the very first frame before any hit has ever happened).
+    visual.position.set(0,0,0);
+    if(visual.userData._hitFlashMats){
+      for(const m of visual.userData._hitFlashMats){ if(m.emissive) m.emissive.setRGB(0,0,0); m.emissiveIntensity=0; }
+    }
+    return;
+  }
+  const k = hitTimer / HIT_REACTION_DURATION; // 0 at moment of impact -> 1 at fully decayed
+  // Recoil: sharp backward jolt that springs back, eased with k*(1-k)-style curve
+  // so it peaks early and returns to zero by k=1, rather than a linear lean.
+  const recoilCurve = Math.sin(k*Math.PI) * (1-k); // peaks just after impact, fully zero by k=1
+  visual.position.set(0, 0, -HIT_RECOIL_DISTANCE*recoilCurve);
+  // Flash: instant spike at k=0, eased-out fade (1-k)^2 so it dims quickly
+  // rather than lingering linearly.
+  const flashCurve = (1-k)*(1-k);
+  if(!visual.userData._hitFlashMats){
+    // Cache every material on this visual once, so we're not re-walking the
+    // skeleton's mesh hierarchy every single frame just to find materials.
+    const mats=[];
+    visual.traverse(o=>{
+      if(o.material){
+        if(Array.isArray(o.material)) mats.push(...o.material);
+        else mats.push(o.material);
+      }
+    });
+    visual.userData._hitFlashMats = mats;
+  }
+  for(const m of visual.userData._hitFlashMats){
+    if(!m.emissive) continue; // defensive — only MeshStandardMaterial/MeshPhysicalMaterial support emissive
+    m.emissive.setRGB(1,0,0);
+    m.emissiveIntensity = flashCurve * 1.2;
+  }
+}
+function updateHitReactions(dt){
+  _playerHitTimer = Math.min(HIT_REACTION_DURATION, _playerHitTimer + dt);
+  _enemyHitTimer  = Math.min(HIT_REACTION_DURATION, _enemyHitTimer + dt);
+  applyHitReaction(dragonVisual, _playerHitTimer);
+  applyHitReaction(enemyVisual, _enemyHitTimer);
+}
+
+function playDragonRoar(){ playCombatSfx(ASSET.sfxDragonRoar, 0.6); }
+function playFireHit(){ playCombatSfx(ASSET.sfxFireHit, 0.5); }
+function playDragonHurt(){ playCombatSfx(ASSET.sfxDragonHurt, 0.5); }
+function playDragonDeath(){ playCombatSfx(ASSET.sfxDragonDeath, 0.65); }
+function playVictoryRoar(){ playCombatSfx(ASSET.sfxVictoryRoar, 0.65); }
+
+// ── Explore/Defend mode switch ───────────────────────────────────────────
+// Repositions the enemy to a fresh spot opposite the player and resets its
+// HP/fire meter. Originally inline in the death-trigger below; extracted so
+// setGameMode('defend') can reuse the exact same respawn logic for the fresh
+// spawn each time Defend mode is entered.
+function respawnEnemy(){
+  enemyHP = 100;
+  enemyFireMeter = 100;
+  eRadial.copy(radial).negate().normalize();
+  eForward.set(Math.random()-0.5, Math.random()-0.5, Math.random()-0.5)
+          .addScaledVector(eRadial,-eForward.dot(eRadial)).normalize();
+  eProjectForward();
+  enemyRoot.position.copy(eRadial.clone().multiplyScalar(earthR + eAltitude));
+  const flash = document.getElementById('lightningFlash');
+  if(flash){ flash.style.background='#ff0'; flash.style.opacity='0.25'; }
+  setTimeout(()=>{ if(flash) flash.style.opacity='0'; }, 500);
+  // Re-arm the appear-roar so it plays again for this fresh life, per design
+  // ("after death it respawns and appears again we play again").
+  _enemyAppearRoarPlayed = false;
+}
+function setGameMode(mode){
+  if(mode === gameMode) return;
+  gameMode = mode;
+  if(mode === 'defend'){
+    // Fresh spawn each time Defend is entered, per design: respawn the enemy,
+    // reset HP/fire, and treat this as a fresh "appearance" so the roar plays.
+    respawnEnemy();
+    if(enemyVisual) enemyVisual.visible = true;
+    if(enemyFireCone) enemyFireCone.visible = false; // updateEnemyDragon sets this true only while actually firing
+    // Swap background music: pause explore bgMusic, start combat_bg (both still
+    // respect musicOn — if music was off, combat_bg simply won't play either,
+    // same as bgMusic wouldn't).
+    if(bgMusic) bgMusic.pause();
+    initCombatMusic();
+    if(musicOn) combatMusic.play().catch(()=>{});
+    // Also silence explore-mode biome/proximity ambience — Defend mode has its
+    // own fixed audio set only, per the "none of the explorer sound effects" requirement.
+    if(_activeBiomeId){ const b=BIOMES.find(x=>x.id===_activeBiomeId); if(b) getBiomeAudio(b).pause(); }
+    if(_fadingBiomeId){ const b=BIOMES.find(x=>x.id===_fadingBiomeId); if(b) getBiomeAudio(b).pause(); }
+    _activeBiomeId=null; _fadingBiomeId=null; _biomeFadeDir=0; _biomeFadeT=0; _biomeDwell.clear();
+    for(const p of PROXIMITY_SOUNDS){ const a=_proximityAudio.get(p.id); if(a) a.pause(); }
+    _proximityFade.clear();
+  } else {
+    // Back to Explore: hide/freeze enemy, stop combat audio, restore bgMusic.
+    if(enemyVisual) enemyVisual.visible = false;
+    if(enemyFireCone) enemyFireCone.visible = false;
+    eIsFiring = false; // the actual live enemy-firing flag (enemyFireActive appears unused elsewhere) — reset so re-entering Defend later doesn't replay the fire sound from stale state
+    if(_playerFireSound && !_playerFireSound.paused) _playerFireSound.pause();
+    if(_enemyFireSound && !_enemyFireSound.paused) _enemyFireSound.pause();
+    _playerWasFiring = false; _enemyWasFiring = false;
+    eNeckYaw = 0; eNeckPitch = 0;
+    if(combatMusic) combatMusic.pause();
+    if(musicOn && bgMusic) bgMusic.play().catch(()=>{});
+  }
+  const el=document.getElementById('modeH');
+  if(el) el.textContent = mode==='defend' ? '⚔ Defend' : '🧭 Explore';
+  status('Mode: '+(mode==='defend'?'Defend':'Explore'));
+}
+function toggleGameMode(){ setGameMode(gameMode==='defend' ? 'explore' : 'defend'); }
+let aiDebugOn = false;
+function toggleAiDebug(){
+  aiDebugOn = !aiDebugOn;
+  const el = document.getElementById('aiDebugH');
+  if(el) el.style.display = aiDebugOn ? 'block' : 'none';
+}
+
 // Cached wing bone lookups (found once at model load, see findWingBones) and the
 // reusable scratch arrays their live world-space spheres get written into each frame.
 let playerWingBones=null, enemyWingBones=null;
 let playerCapsuleBones=null, enemyCapsuleBones=null;
 const _playerWingScratch=[], _enemyWingScratch=[];
 let dolphinTemplate=null, dolphinJumpClip=null, dolphinSwimClip=null, dolphinSpawnCanvas=null, dolphinSpawnCtx=null, dolphinSpawnTimer=2.2;
+// CPU-readable copy of topo.jpg for mountain-biome elevation lookups. The GPU
+// texture loaded via tex(ASSET.topo) for the Earth shader has no readable pixel
+// buffer on the JS side, so this is a second, independent load of the same file
+// through the canvas+getImageData pattern loadMask() already uses for the
+// dolphin spawn mask — see BIOMES' mountain entry for the actual threshold.
+let topoCanvas=null, topoCtx=null;
+// CPU-readable copy of the land mask (already used GPU-side as ASSET.land for
+// ocean/land shading) — needed so the forest biome can require actual land, not
+// just "within the equatorial latitude band," which would otherwise also fire
+// over open equatorial ocean (Pacific/Atlantic/Indian).
+let landCanvas=null, landCtx=null;
 let dolphinAllowedDirections=[];
 let dolphinFoamTexture=null, dolphinRippleTexture=null, dolphinDropletTexture=null, dolphinWakeTexture=null;
 let dolphinSpawnBorderMesh=null, dolphinSpawnBorderVisible=false;
@@ -207,6 +786,14 @@ const FIRE_REFILL_DELAY = 5.0;  // seconds after last fire before refill starts
 let   fireLastUsed      = -999; // clock.elapsedTime when space last pressed
 
 // ── Enemy dragon state ─────────────────────────────────────────────────
+// gameMode: 'explore' (default, matches original behavior — no enemy, no combat)
+// or 'defend' (enemy spawns fresh, AI/combat/HP bars/fire active, combat audio).
+// The enemy's THREE objects are built once by initEnemyDragon() and never
+// destroyed — switching modes only hides/shows and starts/stops updates, which
+// avoids re-fetching/re-decoding dragon.glb (a measurably expensive operation,
+// see earlier conversation notes) on every toggle.
+let gameMode = 'explore';
+const ENEMY_VISIBLE_RADIUS = 7; // distance at which the enemy counts as "appeared" for the roar-on-appear trigger
 let enemyRoot    = null;   // THREE.Group — enemy position/orientation
 let enemyVisual  = null;   // loaded GLB scene (same model)
 let enemyMixer   = null;
@@ -217,6 +804,33 @@ let enemyMouthBone = null;
 let enemyFireActive= false;
 let enemyFireWorldPos = new THREE.Vector3();
 let enemyFireWorldQuat= new THREE.Quaternion();
+// Rising-edge trackers for hit SFX — fire damage is applied continuously every
+// frame while a fire cone connects (see the two damage blocks below), but the
+// hurt/hit sound should only play once per hit EVENT (false->true transition),
+// not every single frame for as long as the beam stays connected.
+let _playerWasHit = false, _enemyWasHit = false;
+// Hit-reaction visual state: a brief red emissive flash + backward recoil jolt,
+// since the dragon GLB only has idle/running/flying clips (no dedicated hurt
+// animation). Triggered at the same rising-edge moments as the hurt/hit sounds.
+// _xHitTimer counts UP from 0 once triggered; the effect plays out and ends once
+// it exceeds HIT_REACTION_DURATION (rather than counting down) so re-triggering
+// mid-effect can simply reset it to 0 for a clean restart.
+const HIT_REACTION_DURATION = 0.4; // seconds the flash+recoil takes to fully decay
+const HIT_RECOIL_DISTANCE = 0.12;  // local-space units knocked backward at peak (dragon body is ~0.78 units long)
+let _playerHitTimer = HIT_REACTION_DURATION; // start "finished" so no effect plays before any real hit
+// Whether the player's fire cone is CURRENTLY connecting with the enemy's
+// hitbox, recomputed every frame inside updateFireBreath (which runs before
+// updateEnemyDragon in the animate() loop, so this is always fresh by the time
+// the AI reads it — no one-frame lag). Used for anticipatory evasion: the AI
+// reacts to being targeted, not to having already taken damage.
+let _playerAimedAtEnemy = false;
+let _playerFireOrigin = new THREE.Vector3();
+let _playerFireDir    = new THREE.Vector3(0,0,1);
+let _enemyHitTimer  = HIT_REACTION_DURATION;
+// Tracks whether the "enemy appeared" roar has already played for the enemy's
+// current life — reset on every respawn (including the fresh spawn when
+// entering Defend mode) so the roar plays again each time, per design.
+let _enemyAppearRoarPlayed = false;
 
 // Enemy flight state (mirrors player variables)
 let eRadial  = new THREE.Vector3(-0.20, 0.55, -0.81).normalize();
@@ -225,11 +839,12 @@ let eRight   = new THREE.Vector3();
 let eAltitude= 0.76;
 let eSpeed   = 0.038;
 // Enemy AI state
-let eFireTimer = 3.0;  // countdown to next fire attempt
 let eIsFiring  = false;
 let eFireDuration = 0;
+let eFireCooldown = 0;      // seconds remaining before a new burst can start, set after each burst ends — separate from fuel/range/angle, gives fuel a genuine window to recover rather than re-triggering the instant any fuel ticks back above 0
+const EAI_FIRE_COOLDOWN_SECONDS = 8.0;
 let enemyFireMeter = 100;  // same as playerFire — 0–100, drains/refills identically
-let eFireLastUsed  = 0;     // timestamp of last fire use, for refill delay
+let eFireLastUsed  = -999;     // timestamp of last fire use, for refill delay (matches player's own initial value)
 // Fire cone damage geometry — derived from the actual widest fire flipbook plane
 // (fire-isometric-diagonal: w=1.68,h=2.55,posY=1.14, see makeFireBreath/addFirePlane),
 // not hand-picked. This guarantees the hit cone, the visible debug cone mesh, and the
@@ -249,6 +864,7 @@ const FIRE_VISIBLE_SHRINK = 0.60;
 const FIRE_CONE_LEN   = FIRE_PLANE_FAR_EDGE   * FIRE_VISIBLE_SHRINK; // world units, from mouth tip
 const FIRE_CONE_RAD   = FIRE_PLANE_HALF_WIDTH * FIRE_VISIBLE_SHRINK; // world units, at far edge
 const FIRE_CONE_RANGE = 2.8;  // world units — AI engagement range, kept independent of visual cone
+const AI_FIRE_ANGLE_THRESHOLD = THREE.MathUtils.degToRad(80); // how far off-axis the enemy can be and still decide to fire — deliberately generous and independent of the narrow visual cone's own angle (FIRE_CONE_ANGLE, ~19°), since this is a "roughly facing the target" decision heuristic, not a hit-detection check; the real fire-vs-target collision uses actual cone geometry separately and isn't affected by this
 const FIRE_CONE_ANGLE = Math.atan(FIRE_CONE_RAD / FIRE_CONE_LEN); // radians half-angle, consistent with LEN/RAD above
 
 // ── Dragon hit/collision capsule — single source of truth ──────────────────
@@ -446,6 +1062,8 @@ let camYaw=0,camPitch=Math.PI/2,camDist=3.80,dragging=false,mx=0,my=0,keys={};
 let camMode='top';
 // Neck look control — mouse in combat mode aims the neck bone
 let neckYaw=0, neckPitch=0;  // radians
+let eNeckYaw=0, eNeckPitch=0;  // radians — enemy equivalent, AI-driven (continuous track-the-player) rather than mouse-driven
+let enemyNeckBone=null;
 let neckBone=null;
 const NECK_YAW_MAX   = THREE.MathUtils.degToRad(30);
 const NECK_PITCH_MAX = THREE.MathUtils.degToRad(20);
@@ -1491,6 +2109,7 @@ function updateCloudCollision(dt){
               pe.mesh.userData.scattered   = true;
               pe.mesh.userData.scatterLife = 0;
               pe.mesh.userData.lastTick    = clock.elapsedTime;
+              playCloudPoof();
               // Store original home so Phase B snaps back to it
               pe.mesh.userData.origHome    = pe.mesh.userData.home.clone();
 
@@ -2014,6 +2633,15 @@ function updateNeckLook(){
   neckBone.rotation.y += neckYaw;
   neckBone.rotation.x += neckPitch;
 }
+function updateEnemyNeckLook(){
+  if(!enemyNeckBone) return;
+  // eNeckYaw/eNeckPitch are already computed (target + smoothing) inside
+  // updateEnemyDragon, since that's where the player's world position and the
+  // enemy's own local axes are already available — this just applies them.
+  enemyNeckBone.rotation.order = 'YXZ';
+  enemyNeckBone.rotation.y += eNeckYaw;
+  enemyNeckBone.rotation.x += eNeckPitch;
+}
 
 function updateFireBreath(dt,t){
   if(!fireBreath) return;
@@ -2080,7 +2708,17 @@ function updateFireBreath(dt,t){
         if(coneHitsSphere(mouthPos, fireFwd, FIRE_CONE_ANGLE, FIRE_CONE_LEN, eWings[i].center, eWings[i].radius)){ hit=true; break; }
       }
     }
-    if(hit) enemyHP = Math.max(0, enemyHP - 5.0 * dt);
+    if(hit){
+      if(!_enemyWasHit){ playFireHit(); _enemyHitTimer = 0; }
+      enemyHP = Math.max(0, enemyHP - 5.0 * dt);
+    }
+    _enemyWasHit = hit;
+    _playerAimedAtEnemy = hit;
+    _playerFireOrigin.copy(mouthPos);
+    _playerFireDir.copy(fireFwd);
+  } else {
+    _enemyWasHit = false; // player stopped firing entirely — reset so the next genuinely new hit replays the sound
+    _playerAimedAtEnemy = false;
   }
 }
 
@@ -2101,6 +2739,16 @@ function loadDolphinWaterMasks(){
     dolphinSpawnCtx=ctx;
     createDolphinAllowedDirectionCache(c,ctx);
     createDolphinSpawnBorderOverlay(c,ctx);
+  });
+  // CPU-readable elevation map for mountain-biome detection (see BIOMES).
+  loadMask(ASSET.topo,(c,ctx)=>{
+    topoCanvas=c;
+    topoCtx=ctx;
+  });
+  // CPU-readable land mask for forest-biome land-only detection (see BIOMES).
+  loadMask(ASSET.land,(c,ctx)=>{
+    landCanvas=c;
+    landCtx=ctx;
   });
 }
 function uvToDir(u,v){
@@ -2689,10 +3337,17 @@ function makeDragonFallback(){
 function loadDragon(){
   status('Loading Dragon.glb...');
   new THREE.GLTFLoader().load(ASSET.dragon,gltf=>{
-    dragonRoot.clear(); dragonVisual=gltf.scene;
-    const box=new THREE.Box3().setFromObject(dragonVisual), size=new THREE.Vector3(), ctr=new THREE.Vector3(); box.getSize(size); box.getCenter(ctr); dragonVisual.position.sub(ctr);
-    const maxDim=Math.max(size.x,size.y,size.z)||1; dragonVisual.scale.setScalar(0.78/maxDim);
-    dragonVisual.traverse(o=>{
+    // Universal mesh setup, done ONCE on the raw loaded scene before anyone clones
+    // it. This used to run again, redundantly, inside initEnemyDragon's own
+    // separate GLTFLoader callback — both player and enemy fetched and decoded
+    // the same 33MB file independently. Now the file is fetched/decoded exactly
+    // once; the enemy gets an independent SkeletonUtils.clone() of this template
+    // instead (own skeleton, own bones, own cloned materials — safe to tint red
+    // without affecting the player's copy).
+    const template=gltf.scene;
+    const box=new THREE.Box3().setFromObject(template), size=new THREE.Vector3(), ctr=new THREE.Vector3(); box.getSize(size); box.getCenter(ctr); template.position.sub(ctr);
+    const maxDim=Math.max(size.x,size.y,size.z)||1; template.scale.setScalar(0.78/maxDim);
+    template.traverse(o=>{
       if(o.isMesh){
         o.frustumCulled=false;
         o.castShadow=true;
@@ -2712,6 +3367,24 @@ function loadDragon(){
           o.customDepthMaterial.skinning=true;
           o.customDepthMaterial.side=THREE.DoubleSide;
         }
+      }
+    });
+    dragonTemplate=template;
+    dragonTemplateAnimations=gltf.animations||[];
+
+    // Player gets its own clone, same as the enemy will — keeps both instances
+    // fully independent (own skeleton/bones/materials) even though only one fetch
+    // and one round of universal setup happened above.
+    dragonRoot.clear();
+    dragonVisual=(THREE.SkeletonUtils&&THREE.SkeletonUtils.clone)?THREE.SkeletonUtils.clone(dragonTemplate):dragonTemplate.clone(true);
+    // SkeletonUtils.clone reuses materials by reference (same fact noted in the
+    // enemy's own clone step below) — re-clone here too so dragonVisual's
+    // material is genuinely independent of the template's, safe for the hit-
+    // reaction flash (or anything else) to mutate without side effects.
+    dragonVisual.traverse(o=>{
+      if(o.isMesh && o.material){
+        if(Array.isArray(o.material)) o.material=o.material.map(m=>m?m.clone():m);
+        else o.material=o.material.clone();
       }
     });
     dragonRoot.add(dragonVisual);
@@ -2734,7 +3407,20 @@ function loadDragon(){
       status('Bone names logged to console — press F12 to inspect');
     }
     if(gltf.animations&&gltf.animations.length){mixer=new THREE.AnimationMixer(dragonVisual); const fly=gltf.animations.find(c=>/fly/i.test(c.name))||gltf.animations[0]; flyAction=mixer.clipAction(fly); flyAction.play(); status('Dragon loaded: '+fly.name);} else status('Dragon loaded: no animation clips found.');
-  },undefined,e=>status('Dragon load failed. Use local server: python -m http.server. '+(e.message||'')));
+    // Template is ready — run any callbacks that were waiting on it (the enemy
+    // dragon, if initEnemyDragon() already ran its synchronous setup and reached
+    // its onDragonTemplateReady call before this finished).
+    while(dragonTemplateCallbacks.length) dragonTemplateCallbacks.shift()(dragonTemplate, dragonTemplateAnimations);
+  },undefined,e=>{
+    status('Dragon load failed. Use local server: python -m http.server. '+(e.message||''));
+    // Enemy depends on this same load via onDragonTemplateReady — if it failed,
+    // let any waiting callbacks know rather than leaving them hanging silently
+    // with no feedback at all.
+    if(dragonTemplateCallbacks.length){
+      status('Enemy dragon also failed to load (shares the same dragon.glb fetch).');
+      dragonTemplateCallbacks.length=0;
+    }
+  });
 }
 function makeShadow(){
   // Real dynamic shadow: the animated dragon mesh casts onto a transparent tangent receiver
@@ -2875,6 +3561,10 @@ function addEvents(){
     if(e.code==='KeyB')      toggleDolphinSpawnBorders();
     if(e.code==='KeyC')      toggleClouds();
     if(e.code==='KeyV')      toggleCollisionDebug();
+    if(e.code==='KeyM')      toggleMusic();
+    if(e.code==='KeyN')      toggleSfx();
+    if(e.code==='KeyG')      toggleGameMode();
+    if(e.code==='KeyH')      toggleAiDebug();
     if(e.code==='KeyT'){
       if(camMode==='top'){
         camMode='follow'; camPitch=0.14; camDist=3.20;
@@ -2904,8 +3594,9 @@ function addEvents(){
   // In follow mode: yaw + pitch orbit
   canvas.addEventListener('mousedown',e=>{
     dragging=true; mx=e.clientX; my=e.clientY;
-    // Left click fires, same as SPACE — works in any camera mode
-    if(e.button===0){ keys.space=true; }
+    // Left click fires, but only in combat camera mode — in top/follow modes a
+    // left click is just the start of a camera-orbit drag, not a fire command.
+    if(e.button===0 && camMode==='combat'){ keys.space=true; }
   });
   addEventListener('mouseup',e=>{
     dragging=false;
@@ -3014,32 +3705,46 @@ function initEnemyDragon(){
   playerFireCone.visible = false;
   scene.add(playerFireCone);
 
-  // Load same dragon model
+  // Enemy uses the same loaded dragon model as the player — wait for loadDragon()'s
+  // fetch to finish (or use it immediately if it already has), then clone it via
+  // SkeletonUtils, instead of issuing a second independent GLTFLoader.load() for
+  // the same 33MB file. This used to decode all 4 embedded textures and rebuild
+  // the 219-bone skeleton a second time, on every single page load, for no benefit
+  // since the enemy and player render the identical geometry/textures anyway —
+  // only the red tint below is genuinely enemy-specific.
   status('Loading enemy dragon...');
-  new THREE.GLTFLoader().load(ASSET.dragon, gltf=>{
+  onDragonTemplateReady((template, animations)=>{
     enemyRoot.clear();
-    enemyVisual = gltf.scene;
-    const box=new THREE.Box3().setFromObject(enemyVisual), size=new THREE.Vector3(), ctr=new THREE.Vector3();
-    box.getSize(size); box.getCenter(ctr);
-    enemyVisual.position.sub(ctr);
-    const maxDim=Math.max(size.x,size.y,size.z)||1;
-    enemyVisual.scale.setScalar(0.78/maxDim);
+    enemyVisual=(THREE.SkeletonUtils&&THREE.SkeletonUtils.clone)?THREE.SkeletonUtils.clone(template):template.clone(true);
 
-    // Tint enemy red so it's visually distinct
+    // Tint enemy red so it's visually distinct. IMPORTANT: SkeletonUtils.clone
+    // reuses materials BY REFERENCE (only geometry/bones are deep-cloned) — per
+    // the three.js docs, "other data, like geometries and materials, are reused
+    // by reference". Mutating a shared material's color here would also recolor
+    // the player's dragon, since both clones would point at the literal same
+    // Material instance. Each mesh's material is explicitly cloned first so the
+    // enemy gets its own independent copy to tint.
     enemyVisual.traverse(o=>{
       if(o.isMesh){
+        // Defensively re-assert (matches the existing dolphin clone pattern at
+        // createDolphinInstance) rather than relying solely on these having
+        // propagated correctly from the template through SkeletonUtils.clone's
+        // internal source.clone() — cheap, and removes one assumption.
         o.frustumCulled=false;
+        o.castShadow=true;
+        o.receiveShadow=false;
+        if(Array.isArray(o.material)) o.material=o.material.map(m=>m?m.clone():m);
+        else if(o.material) o.material=o.material.clone();
         const mats=Array.isArray(o.material)?o.material:[o.material];
         mats.forEach(m=>{
           if(!m) return;
-          m.color && m.color.multiplyScalar(1.0);
-          // Red tint
           if(m.color) m.color.set(0x8b1a1a);
-          m.side=THREE.DoubleSide;
-          if('roughness' in m) m.roughness=0.74;
-          if(o.isSkinnedMesh) m.skinning=true;
           m.needsUpdate=true;
         });
+        // customDepthMaterial was set on the shared template's mesh (by reference
+        // through traverse, since meshes themselves ARE deep-cloned by
+        // SkeletonUtils — only material/geometry data is shared) — give the
+        // enemy its own depth material too, for the same reason as above.
         if(o.isSkinnedMesh){
           o.customDepthMaterial=new THREE.MeshDepthMaterial({depthPacking:THREE.RGBADepthPacking});
           o.customDepthMaterial.skinning=true;
@@ -3051,18 +3756,20 @@ function initEnemyDragon(){
     enemyMouthBone = findMouthBone(enemyVisual);
     enemyWingBones = findWingBones(enemyVisual);
     enemyCapsuleBones = findCapsuleBones(enemyVisual);
+    enemyNeckBone = findNeckBone(enemyVisual);
+    status(enemyNeckBone ? ('Enemy neck bone found: '+enemyNeckBone.name) : 'No enemy neck bone found — enemy head-tracking disabled');
 
     // Fire breath — reuse same material factory
     makeEnemyFireBreath();
 
-    if(gltf.animations&&gltf.animations.length){
+    if(animations&&animations.length){
       enemyMixer=new THREE.AnimationMixer(enemyVisual);
-      const fly=gltf.animations.find(c=>/fly/i.test(c.name))||gltf.animations[0];
+      const fly=animations.find(c=>/fly/i.test(c.name))||animations[0];
       enemyAction=enemyMixer.clipAction(fly);
       enemyAction.play();
     }
     status('Enemy dragon loaded');
-  }, undefined, e=>status('Enemy load failed: '+(e.message||'')));
+  });
 }
 
 function makeEnemyFireBreath(){
@@ -3097,6 +3804,17 @@ function eProjectForward(){
 
 function updateEnemyDragon(dt, t){
   if(!enemyRoot) return;
+  if(gameMode !== 'defend') return; // Explore mode: enemy stays loaded but fully inert — no AI, no movement, no fire, no collision
+
+  // ── Appear-roar: play once per "life" when the enemy first comes within
+  // visible range of the player, re-armed by respawnEnemy() on every respawn. ──
+  if(!_enemyAppearRoarPlayed){
+    const distToPlayerNow = enemyRoot.position.distanceTo(dragonRoot.position);
+    if(distToPlayerNow <= ENEMY_VISIBLE_RADIUS){
+      playDragonRoar();
+      _enemyAppearRoarPlayed = true;
+    }
+  }
 
   // ── AI: track player using shortest arc on sphere ─────────────────────
   const playerPos = dragonRoot.position.clone().normalize(); // direction on sphere
@@ -3114,6 +3832,38 @@ function updateEnemyDragon(dt, t){
   eForward.applyAxisAngle(eRadial, turnAmt);
   eProjectForward();
 
+  // ── Evasion: dodge away from the player's fire cone when targeted ──────
+  // Anticipatory — reacts the instant the cone is aimed at the enemy (same
+  // signal used for damage/hit-reaction), not after damage has already landed.
+  // Dodges PERPENDICULAR to the beam's own axis rather than retreating along
+  // it, since the cone widens with distance from its origin — moving backward
+  // along the beam would keep the enemy inside it for longer, not escape it.
+  // Evades ONLY when out of fuel — NOT merely out of range/angle — per explicit
+  // design decision: dodging while out of position was found to actively fight
+  // the enemy's own re-aim/approach (evasion turns the heading AWAY from the
+  // player, which is also away from the direction needed to re-acquire a firing
+  // angle), producing an emergent "alternating hits" feel where the enemy could
+  // never quite get back into position to fire concurrently with the player.
+  // With fuel as the only gate, the enemy keeps tracking/approaching normally
+  // whenever it has fuel to eventually fire, and only dodges when it genuinely
+  // has nothing to fire back with.
+  let evadeRight = 0, evadeUp = 0;
+  if(_playerAimedAtEnemy && !eIsFiring && enemyFireMeter <= 0){
+    const toEnemy = enemyRoot.position.clone().sub(_playerFireOrigin);
+    const alongAxis = toEnemy.dot(_playerFireDir);
+    const perp = toEnemy.clone().addScaledVector(_playerFireDir, -alongAxis); // component perpendicular to the beam
+    if(perp.lengthSq() < 1e-6){
+      // Degenerate case: enemy is essentially dead-center on the beam axis,
+      // with no defined perpendicular direction to push toward — pick a side
+      // arbitrarily rather than leave this as a zero/NaN vector.
+      perp.copy(eRight);
+    } else {
+      perp.normalize();
+    }
+    evadeRight = perp.dot(eRight); // +1 = dodge fully right, -1 = fully left
+    evadeUp    = perp.dot(eRadial); // +1 = dodge fully up, -1 = fully down
+  }
+
   // ── Altitude: aim fire cone at player ────────────────────────────────
   // Compute where the player is relative to enemy mouth in the radial direction.
   // Enemy needs to be at an altitude so that the vertical angle to player
@@ -3124,7 +3874,16 @@ function updateEnemyDragon(dt, t){
   // Aim to sit at player altitude + slight upward bias so cone points down at them
   const altTarget  = playerAlt + 0.05;
   const altDiff    = altTarget - eAltitude;
-  eAltitude = clamp(eAltitude + altDiff * dt * 1.8, minAlt, maxAlt);
+  const EVADE_ALT_RATE = 1.6; // units/sec of additional altitude bias at full evasion strength
+  eAltitude = clamp(eAltitude + altDiff * dt * 1.8 + evadeUp * EVADE_ALT_RATE * dt, minAlt, maxAlt);
+  // Lateral evasion is applied as an extra rotation around eRadial, the same
+  // mechanism the tracking-turn above already uses, so it composes naturally
+  // with the existing steering rather than fighting it.
+  const EVADE_TURN_RATE = 2.2; // radians/sec of additional turn at full evasion strength
+  if(evadeRight !== 0){
+    eForward.applyAxisAngle(eRadial, -evadeRight * EVADE_TURN_RATE * dt);
+    eProjectForward();
+  }
 
   // ── Move forward at constant speed ────────────────────────────────────
   eRadial.addScaledVector(eForward, eSpeed*dt).normalize();
@@ -3140,30 +3899,90 @@ function updateEnemyDragon(dt, t){
   // ── Distance and angle to player ──────────────────────────────────────
   const distToPlayer = enemyRoot.position.distanceTo(dragonRoot.position);
 
-  // Direction from enemy mouth toward player
-  const eMouthPos = enemyRoot.position.clone()
-    .addScaledVector(eForward, 0.32)
-    .addScaledVector(eRadial,  0.34);
+  // Direction from enemy mouth toward player. Uses the real bone-tracked
+  // enemyFire.position (same source the actual damage-detection cone uses,
+  // see eMouthPos2 below) rather than a hand-tuned 0.32/0.34 offset from the
+  // root — that offset (~0.4669 units) turned out to be comparable to or
+  // larger than the real fire cone's own reach (~0.46 units), which badly
+  // distorted this angle specifically within real hit range: a player
+  // directly in front of the enemy at 0.3 units could compute as 93° off-
+  // axis instead of ~0°, only becoming accurate again once the player was
+  // far enough that the offset became negligible by comparison. This was the
+  // actual cause of the enemy only firing once the player was "way out" of
+  // the cone, not within it.
+  const eMouthPos = enemyFire ? enemyFire.position : enemyRoot.position.clone().addScaledVector(eForward,0.32).addScaledVector(eRadial,0.34);
   const toPlayerWorld = dragonRoot.position.clone().sub(eMouthPos).normalize();
   const angleToPlayer = Math.acos(clamp(eForward.dot(toPlayerWorld), -1, 1));
 
+  // ── Enemy neck-look: continuous AI-driven tracking toward the player ───
+  // Mirrors the player's own mouse-driven neck-look (same ±NECK_YAW_MAX/
+  // ±NECK_PITCH_MAX range, same additive rotation applied in updateEnemyNeckLook
+  // below), but driven by the player's actual world position every frame
+  // instead of mouse input, per explicit design decision (continuous tracking,
+  // like a real animal watching its target, rather than only during firing).
+  // Decomposes the existing toPlayerWorld direction into the enemy's own local
+  // right/up components via atan2 to get a signed angle in each axis.
+  // NOTE: the sign mapping onto neckBone.rotation.y/.x (in updateEnemyNeckLook)
+  // is a best estimate based on eRight/eRadial's known definitions, not yet
+  // visually confirmed in-game — flip the signs there if the head turns away
+  // from the player instead of toward it.
+  if(enemyNeckBone){
+    const rightComp = toPlayerWorld.dot(eRight);
+    const upComp     = toPlayerWorld.dot(eRadial);
+    const fwdComp    = toPlayerWorld.dot(eForward);
+    const targetYaw   = clamp(Math.atan2(rightComp, fwdComp), -NECK_YAW_MAX,   NECK_YAW_MAX);
+    const targetPitch = clamp(Math.atan2(upComp,    fwdComp), -NECK_PITCH_MAX, NECK_PITCH_MAX);
+    eNeckYaw   += (targetYaw   - eNeckYaw)   * 0.08;
+    eNeckPitch += (targetPitch - eNeckPitch) * 0.08;
+  }
+
   // ── AI fire decision ──────────────────────────────────────────────────
-  eFireTimer -= dt;
-  if(eFireTimer <= 0 && enemyFireMeter > 10 && distToPlayer < FIRE_CONE_RANGE * 1.2 && angleToPlayer < FIRE_CONE_ANGLE * 1.5){
+  // Fires as soon as the player is in range/angle and there's enough fuel,
+  // EXCEPT for a cooldown after each burst ends (EAI_FIRE_COOLDOWN_SECONDS,
+  // separate from fuel/range/angle). Without this, the enemy would re-trigger
+  // a new burst the instant ANY fuel ticked back above 0 during the refill
+  // delay window — since drain (40/sec) far outpaces refill (20/sec, itself
+  // gated behind a flat 5s post-fire delay), this trapped fuel in a loop that
+  // never let it climb back to a meaningful level, leaving the enemy
+  // permanently starved. This cooldown is NOT the same as the earlier-removed
+  // one (which blocked firing even when fully ready and in perfect position
+  // for several seconds) — it only prevents back-to-back re-triggering right
+  // after a burst. A 2s cooldown was tried first but verified (via simulation
+  // across a range of realistic engagement rates, not just one favorable case)
+  // to still leave average fuel critically low — 8s gives fuel genuine
+  // recovery room even under sustained, aggressive engagement, while still
+  // allowing real empty-tank moments rather than eliminating them outright.
+  if(eFireCooldown > 0) eFireCooldown -= dt;
+  if(aiDebugOn){
+    const el = document.getElementById('aiDebugH');
+    if(el){
+      const rangeOk = distToPlayer < FIRE_CONE_RANGE*1.2;
+      const angleOk = angleToPlayer < AI_FIRE_ANGLE_THRESHOLD;
+      el.textContent = `dist=${distToPlayer.toFixed(2)}(<${(FIRE_CONE_RANGE*1.2).toFixed(2)} ${rangeOk?'OK':'FAIL'}) `+
+        `ang=${(angleToPlayer*180/Math.PI).toFixed(1)}°(<${(AI_FIRE_ANGLE_THRESHOLD*180/Math.PI).toFixed(1)}° ${angleOk?'OK':'FAIL'}) `+
+        `fuel=${enemyFireMeter.toFixed(0)} firing=${eIsFiring} cooldown=${eFireCooldown.toFixed(1)}`;
+    }
+  }
+  if(!eIsFiring && eFireCooldown<=0 && enemyFireMeter > 0 && distToPlayer < FIRE_CONE_RANGE * 1.2 && angleToPlayer < AI_FIRE_ANGLE_THRESHOLD){
     eIsFiring    = true;
     eFireDuration= 1.5 + Math.random()*1.5;
-    eFireTimer   = 4.0 + Math.random()*4.0;
   }
   if(eIsFiring){
     eFireDuration -= dt;
-    if(eFireDuration <= 0 || enemyFireMeter <= 0) eIsFiring = false;
+    if(eFireDuration <= 0 || enemyFireMeter <= 0){
+      eIsFiring = false;
+      eFireCooldown = EAI_FIRE_COOLDOWN_SECONDS;
+    }
   }
 
   // ── Enemy fire meter — identical drain/refill rules as player ──────────
   if(eIsFiring && enemyFireMeter > 0){
     enemyFireMeter = Math.max(0, enemyFireMeter - FIRE_DRAIN_RATE*dt);
     eFireLastUsed = t;
-    if(enemyFireMeter <= 0) eIsFiring = false;
+    if(enemyFireMeter <= 0){
+      eIsFiring = false;
+      eFireCooldown = EAI_FIRE_COOLDOWN_SECONDS; // burst ended here (fuel exhausted mid-drain, on a frame where the duration check above hadn't caught up yet) — must arm the cooldown here too, or it silently never starts
+    }
   } else if(t - eFireLastUsed > FIRE_REFILL_DELAY){
     enemyFireMeter = Math.min(100, enemyFireMeter + FIRE_REFILL_RATE*dt);
   }
@@ -3225,8 +4044,12 @@ function updateEnemyDragon(dt, t){
       }
     }
     if(hit){
+      if(!_playerWasHit){ playDragonHurt(); _playerHitTimer = 0; }
       playerHP = Math.max(0, playerHP - 5.0 * dt);
     }
+    _playerWasHit = hit;
+  } else {
+    _playerWasHit = false; // enemy stopped firing entirely — reset so the next genuinely new hit replays the sound
   }
 
   // ── Dragon–dragon collision: push apart if overlapping ───────────────
@@ -3268,17 +4091,8 @@ function updateEnemyDragon(dt, t){
 
   // ── Enemy death: reset when HP reaches 0 ────────────────────────────
   if(enemyHP <= 0){
-    enemyHP = 100;
-    enemyFireMeter = 100;
-    // Respawn enemy on opposite side of globe
-    eRadial.copy(radial).negate().normalize();
-    eForward.set(Math.random()-0.5, Math.random()-0.5, Math.random()-0.5)
-            .addScaledVector(eRadial,-eForward.dot(eRadial)).normalize();
-    eProjectForward();
-    enemyRoot.position.copy(eRadial.clone().multiplyScalar(earthR + eAltitude));
-    const flash = document.getElementById('lightningFlash');
-    if(flash){ flash.style.background='#ff0'; flash.style.opacity='0.25'; }
-    setTimeout(()=>{ if(flash) flash.style.opacity='0'; }, 500);
+    playVictoryRoar();
+    respawnEnemy();
     status('Enemy dragon defeated — respawning...');
   }
 
@@ -3365,6 +4179,7 @@ function updatePlayerStats(dt, t){
 
   // ── Death ─────────────────────────────────────────────────────────────
   if(playerHP <= 0){
+    if(gameMode==='defend') playDragonDeath();
     const flash = document.getElementById('lightningFlash');
     if(flash){ flash.style.background='#f00'; flash.style.opacity='0.5'; }
     setTimeout(()=>{ if(flash) flash.style.opacity='0'; }, 800);
@@ -3395,8 +4210,9 @@ function updatePlayerStats(dt, t){
     }
   }
 
-  // Enemy bars — above enemyRoot
-  if(enemyRoot && enemyVisual){
+  // Enemy bars — above enemyRoot (only in Defend mode — enemyRoot/enemyVisual
+  // stay truthy in Explore mode too, since the enemy object is hidden, not destroyed)
+  if(gameMode==='defend' && enemyRoot && enemyVisual){
     const aboveEnemy = enemyRoot.position.clone()
       .addScaledVector(eRadial, 0.55);
     const se = worldToScreen(aboveEnemy);
@@ -3424,7 +4240,7 @@ function animate(){
   if(earthMat){earthMat.uniforms.time.value=t;earthMat.uniforms.detailBoost.value=clamp(1.15-(altitude-.30)/1.45,0.0,1.15);} scene.traverse(o=>{if(o.userData&&o.userData.isWaterShell)o.material.uniforms.time.value=t});
   if(mixer)mixer.update(dt); updateFlight(dt);
   if(earthMat){earthMat.uniforms.dragonGroundDir.value.copy(radial); earthMat.uniforms.dragonShimmerStrength.value=clamp(0.70-altitude*.18,0.22,0.62); earthMat.uniforms.dragonShadowStrength.value=clamp(0.86-altitude*.22,0.28,0.74);}
-  updateShadow(t); updateFireBreath(dt,t); updateNeckLook(); updateEnemyDragon(dt,t); updatePlayerStats(dt,t); updateDolphins(dt,t); updateClouds(t); updateCloudCollision(dt); updateCloudRegrowth(dt); updateWeather(dt,t); updateCamera(dt);
+  updateShadow(t); updateFireBreath(dt,t); updateNeckLook(); updateEnemyDragon(dt,t); updateEnemyNeckLook(); updateHitReactions(dt); updateCombatFireSounds(keys.space && playerFire>0, eIsFiring); updatePlayerStats(dt,t); updateDolphins(dt,t); updateClouds(t); updateCloudCollision(dt); updateCloudRegrowth(dt); updateWeather(dt,t); updateBiomeAudio(dt); updateProximitySounds(dt); updateCamera(dt);
   // Phase 2: keep debug bsphere meshes in sync with drifting clouds
   if(collisionDebug&&debugRoot){
     // Compute both capsule and wing spheres once per frame here (independent of
@@ -3447,7 +4263,10 @@ function animate(){
   document.getElementById('speedH').textContent='Speed '+(speed*1000).toFixed(0); document.getElementById('altH').textContent='Altitude '+altitude.toFixed(2);
   renderer.render(scene,camera);
 }
-document.getElementById('go').onclick=()=>{document.getElementById('start').style.display='none';document.getElementById('hud').style.display='flex';document.getElementById('hint').style.display='block';init();};
+document.getElementById('go').onclick=()=>{document.getElementById('start').style.display='none';document.getElementById('hud').style.display='flex';document.getElementById('hint').style.display='block';init();playMusic();};
+document.getElementById('musicH').onclick=toggleMusic;
+document.getElementById('sfxH').onclick=toggleSfx;
+document.getElementById('modeH').onclick=toggleGameMode;
 </script>
 </body>
 </html>

@@ -1,0 +1,3543 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>SebLague Style Dragon Earth v2 — Phase 2 Clouds</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#02040a;font-family:Arial,Helvetica,sans-serif;color:#dcefff;}
+  #c{display:block;width:100vw;height:100vh;}
+  #start{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:12px;background:radial-gradient(circle at 50% 38%,#10213d 0%,#02040a 62%,#000 100%);z-index:9;text-align:center}
+  #start h1{margin:0;font-size:42px;letter-spacing:2px;color:#ffd179;text-shadow:0 0 28px #f07c00,0 0 60px #123e8e}
+  #start p{margin:0 0 10px;color:#a9cce8;max-width:820px;line-height:1.45}
+  button{border:0;border-radius:999px;padding:13px 32px;background:linear-gradient(135deg,#c87512,#ff9b22);color:#fff;font-size:16px;font-weight:800;letter-spacing:1px;box-shadow:0 0 26px #ff9b2244;cursor:pointer}
+  #hud{position:fixed;display:none;left:14px;right:14px;top:12px;z-index:4;justify-content:space-between;pointer-events:none}
+  .pill{background:rgba(0,0,0,.55);border:1px solid rgba(255,200,112,.32);border-radius:8px;padding:8px 12px;color:#ffcf77;font:12px/1.25 monospace;backdrop-filter:blur(4px)}
+  #hint{position:fixed;display:none;bottom:14px;left:50%;transform:translateX(-50%);z-index:4;white-space:nowrap;color:#b9d7e7;background:rgba(0,0,0,.55);border:1px solid rgba(255,200,112,.25);border-radius:8px;padding:8px 14px;font-size:12px}
+  #status{position:fixed;display:none;left:12px;bottom:12px;max-width:75vw;z-index:5;background:rgba(0,0,0,.62);color:#9df49d;border-radius:6px;padding:6px 9px;font:12px monospace}
+  #cloudFog{position:fixed;inset:0;z-index:3;pointer-events:none;background:radial-gradient(ellipse at 50% 40%,rgba(240,245,255,0.55) 0%,rgba(200,215,235,0.85) 60%,rgba(180,200,225,0.95) 100%);opacity:0;}
+  #cloudH{transition:color 0.4s;}
+  #lightningFlash{position:fixed;inset:0;z-index:6;pointer-events:none;background:#fff;opacity:0;}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="start">
+  <h1>🐉 SEBLAGUE STYLE EARTH v2</h1>
+  <p>Clean rebuilt renderer: separate land/ocean/color/topography/coast/foam layers, flat oceans with bathymetry color, smoothed continents, visible softened elevations, and true Three.js mesh shadow: animated wing flaps cast onto a tangent receiver.</p>
+  <button id="go">TAKE FLIGHT</button>
+</div>
+<div id="hud"><div class="pill" id="speedH">Speed</div><div class="pill" id="altH">Altitude</div><div class="pill" id="cloudH">☁ Clear</div><div class="pill" id="weatherH" style="display:none">🌧</div><div class="pill" id="snowH" style="display:none">❄</div><div class="pill" id="locH">SebLague-style Earth</div><div class="pill" id="musicH" style="cursor:pointer;user-select:none">♪ Music: ON</div></div>
+<div id="cloudFog"></div>
+<div id="lightningFlash"></div>
+<!-- Floating bars rendered in CSS above each dragon via updatePlayerStats positioning -->
+<canvas id="statCanvas" style="position:fixed;inset:0;pointer-events:none;z-index:5;width:100%;height:100%"></canvas>
+<!-- Keep hidden fill divs for JS logic — not displayed -->
+<div id="hpFill"   style="display:none"></div>
+<div id="fireFill" style="display:none"></div>
+<div id="hpVal"    style="display:none"></div>
+<div id="fireVal"  style="display:none"></div>
+<div id="enemyIndicator" style="position:fixed;top:56px;left:14px;z-index:4;font:11px monospace;color:#f88;display:none">🔴 ENEMY</div>
+<div id="hint">↑ thrust · ↓ slow · ←/→ steer · W/S altitude · SPACE fire · T camera · B dolphin borders · C clouds · V debug · Mouse drag rotate · Wheel zoom · R reset</div>
+<div id="status"></div>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/utils/SkeletonUtils.js"></script>
+<script>
+const ASSET = {
+  base:'./assets/base.jpg',
+  // NASA Blue Marble tiled base color. Layout is 4 columns x 2 rows:
+  // top row A1/B1/C1/D1, bottom row A2/B2/C2/D2.
+  // NASA BMNG tile atlas, stitched from A1/A2/B1/B2/C1/C2/D1/D2.
+  // Using one atlas avoids WebGL's 16 texture-unit limit on many browsers/GPUs.
+  nasaAtlas:'./assets/nasa_tiles/world_atlas_8k.jpg',
+  topo:'./assets/topo.jpg',
+  heightNormal:'./assets/height_normal_seb.png',
+  bathy:'./assets/bathy.jpg',
+  land:'./assets/landmask_smooth.png',
+  coast:'./assets/coastline_smooth.png',
+  shore:'./assets/shore_dst_smooth.png',
+  lakes:'./assets/Lakes.png',
+  waveA:'./assets/wave_a.png',
+  waveB:'./assets/wave_b.png',
+  waterNormal:'./assets/water_normal.png',
+  oceanColor:'./assets/ocean_color.png',
+  chloro:'./assets/chloro.png',
+  shallow:'./assets/shallow_blur.png',
+  dragon:'./assets/dragon.glb',
+  fireSide:'./assets/TorchFire-side.png',
+  fireIso:'./assets/TorchFire-isometric.png',
+  fireTop:'./assets/TorchFire-top.png',
+  dolphin:'./assets/dolphin.glb',
+  music:'./assets/background-music.mp3',
+  foamSplash:'./assets/foam_splash.png',
+  rippleHeight:'./assets/ripple_height.png',
+  rippleNormal:'./assets/ripple_normal.png',
+  splashDroplets:'./assets/splash_droplets.png',
+  wakeTrail:'./assets/wake_trail.png',
+  dolphinSpawnMask:'./assets/dolphin_spawn_mask.png'
+};
+const canvas=document.getElementById('c'), statusEl=document.getElementById('status');
+let scene,camera,renderer,clock,earth,earthMat,dragonRoot,dragonVisual,mixer,flyAction,shadowGroup,shadowWingL,shadowWingR,shadowBody,shadowTail,shadowPlane,shadowLight,shadowTarget;
+// The dragon GLB is loaded exactly once (by loadDragon) and kept here as a template;
+// the enemy dragon clones this via SkeletonUtils.clone() instead of re-fetching and
+// re-decoding the same 33MB file a second time. dragonTemplateCallbacks holds any
+// functions waiting for the template to become ready, since loadDragon's fetch is
+// async and initEnemyDragon() runs synchronously right after it's kicked off (so
+// the template usually isn't ready yet at that point).
+let dragonTemplate=null, dragonTemplateAnimations=null;
+const dragonTemplateCallbacks=[];
+function onDragonTemplateReady(cb){
+  if(dragonTemplate) cb(dragonTemplate, dragonTemplateAnimations);
+  else dragonTemplateCallbacks.push(cb);
+}
+let fireBreath=null, fireMats=[], fireTopPlane=null, fireGlow=null, mouthBone=null, fireActive=false;
+// Background music — plain HTMLAudioElement is enough for a single looping track
+// (no mixing/effects needed), and is simpler and more robust than a Web Audio
+// graph for this use case. musicOn reflects user intent (toggle state) separately
+// from whether playback is technically active, so the toggle can be flipped before
+// the track is even created (e.g. if someone clicks the pill before TAKE FLIGHT).
+let bgMusic=null, musicOn=true;
+function initMusic(){
+  if(bgMusic) return;
+  bgMusic=new Audio(ASSET.music);
+  bgMusic.loop=true;
+  bgMusic.volume=0.35;
+}
+function playMusic(){
+  initMusic();
+  if(!musicOn) return;
+  // play() returns a Promise that rejects if the browser blocks autoplay; this is
+  // only ever called from a real click handler (TAKE FLIGHT / the toggle pill), so
+  // it should be allowed, but the catch avoids an unhandled-rejection console error
+  // on browsers/timing edge cases where it's blocked anyway.
+  bgMusic.play().catch(()=>{});
+}
+function toggleMusic(){
+  musicOn=!musicOn;
+  initMusic();
+  if(musicOn) bgMusic.play().catch(()=>{});
+  else bgMusic.pause();
+  const el=document.getElementById('musicH');
+  if(el) el.textContent='♪ Music: '+(musicOn?'ON':'OFF');
+  status('Music: '+(musicOn?'ON':'OFF'));
+}
+// Cached wing bone lookups (found once at model load, see findWingBones) and the
+// reusable scratch arrays their live world-space spheres get written into each frame.
+let playerWingBones=null, enemyWingBones=null;
+let playerCapsuleBones=null, enemyCapsuleBones=null;
+const _playerWingScratch=[], _enemyWingScratch=[];
+let dolphinTemplate=null, dolphinJumpClip=null, dolphinSwimClip=null, dolphinSpawnCanvas=null, dolphinSpawnCtx=null, dolphinSpawnTimer=2.2;
+let dolphinAllowedDirections=[];
+let dolphinFoamTexture=null, dolphinRippleTexture=null, dolphinDropletTexture=null, dolphinWakeTexture=null;
+let dolphinSpawnBorderMesh=null, dolphinSpawnBorderVisible=false;
+let cloudRoot=null, cloudShadowRoot=null, cloudsVisible=true;
+// Shared puff geometry and materials — hoisted so regrowth spawner can use them
+let _puffGeo=null, _puffMats=null;
+
+// ── Phase 2: cloud collision state ───────────────────────────────────────
+// Each cloud bank gets a bounding sphere used for fast dragon overlap tests.
+// inCloudDepth: 0 = clear air, 1 = fully inside cloud (drives fog overlay).
+// cloudTurbulence: applied as a small random nudge to dragon each frame when inside.
+const CLOUD_BSPHERES=[];      // [{center:Vector3, radius:Number, bankIdx}]
+let inCloudDepth=0;
+let cloudFogTarget=0;
+let cloudTurbulenceAccum=new THREE.Vector3();
+let insideCloudBanks=[];
+let cloudCollisionReady=false;
+
+// Per-puff narrow-phase data — built alongside CLOUD_BSPHERES
+// PUFF_BY_BANK[bi] = array of {mesh, worldPos (current), radius}
+const PUFF_BY_BANK=[];
+
+// ── Phase 3: weather system — rain + lightning per cloud bank ─────────────
+// Each bank can independently be a storm cloud.
+// WEATHER[bi] = { raining, lightning, rainTimer, lightningTimer, lightningFlashT,
+//                 rainParticles (Points), lightningGroup (Group) }
+const WEATHER = [];
+let _weatherInitDone = false;
+const _flashEl = document.getElementById('lightningFlash');
+const _weatherHudEl = document.getElementById('weatherH');
+// How many banks are storm clouds at once (random selection, changes over time)
+const STORM_COUNT_MIN = 2;
+const STORM_COUNT_MAX = 6;
+let _stormBanks = new Set();       // currently active storm bank indices
+let _snowBanks  = new Set();       // cloud banks in polar regions — snow clouds
+let _stormReshuffleTimer = 0;
+const STORM_RESHUFFLE_INTERVAL = 45; // seconds between storm pattern changes
+// Polar snow banks — randomly reshuffled like storm banks
+let dolphinNextPodId=1;
+const dolphins=[];
+const _fireWorldPos=new THREE.Vector3(), _fireWorldQuat=new THREE.Quaternion(), _fireLocalOffset=new THREE.Vector3(), _fireLocalRotQuat=new THREE.Quaternion();
+// Reused per-frame scratch arrays for getDragonCapsuleSpheres() — avoids allocating
+// 14 new {center,radius,part} objects every frame for both fire-damage checks.
+const _playerCapsuleScratch=[], _enemyCapsuleScratch=[];
+// Dragon mouth-fire anchor. The rig has a dedicated bone named fireBreath.28 in the
+// raw glTF file. IMPORTANT: GLTFLoader runs every node name through
+// PropertyBinding.sanitizeNodeName(), which strips any character outside
+// [A-Za-z0-9_-] — including periods — before assigning it to the live Object3D's
+// .name. So the bone is "fireBreath.28" in dragon.glb's JSON but "fireBreath28" at
+// runtime; getObjectByName() must use the stripped form or it silently returns
+// null (this exact mismatch caused DRAGON_CAPSULE/WING_CAPSULE to find 0/14 and
+// 0/6 bones the first time those were added — always strip dots from any bone
+// name copied from raw glTF JSON before using it here).
+// Fine tune the flame origin here after attaching to that bone.
+// In this bone's local space: X/Y/Z are small offsets around the mouth.
+// Start with 0s; use increments like 0.01 or 0.02 for tiny adjustments.
+const FIRE_BONE_NAME='fireBreath28';
+const FIRE_BONE_LOCAL_OFFSET=new THREE.Vector3(0.00,0.00,-0.06);
+const FIRE_BONE_LOCAL_ROTATION=new THREE.Euler(Math.PI/2,0,0);
+_fireLocalRotQuat.setFromEuler(FIRE_BONE_LOCAL_ROTATION);
+const FIRE_BONE_SCALE=0.32;
+const DOLPHIN_MAX_ACTIVE=15;
+const DOLPHIN_MAX_ACTIVE_PODS=3;
+const DOLPHIN_POD_MIN=3;
+const DOLPHIN_POD_MAX=5;
+const DOLPHIN_SCALE=0.09;
+const DOLPHIN_SURFACE_OFFSET=0.018;
+const DOLPHIN_SUBMERGE_DEPTH=0.030;
+const DOLPHIN_SURFACE_SKIM_LIFT=0.070;
+const DOLPHIN_SURFACE_TRAVEL=0.0032;
+const DOLPHIN_EXTRA_ARC_LIFT=0.060;
+const DOLPHIN_WAKE_DURATION=1.05;
+const DOLPHIN_JUMP_DURATION=1.28;
+const DOLPHIN_MIN_SPAWN_DELAY=1.0;
+const DOLPHIN_MAX_SPAWN_DELAY=2.4;
+// Dolphin spawning now uses ONLY the hand-painted dolphin_spawn_mask.png.
+// Previous shoreline/zone/visual-colour inference paths are intentionally disabled.
+// Press B to toggle a red border overlay showing the exact allowed dolphin habitat areas.
+const DOLPHIN_SPAWN_RADIUS=0.28; // no longer used for spawning; mask samples are the sole source
+const DOLPHIN_MASK_THRESHOLD=0.45;
+// Keep dolphins safely inside the painted white zones instead of right on the edge.
+const DOLPHIN_MASK_INSET=0.035; // hard spawn-only inset so pods stay well inside territory boundaries
+const DOLPHIN_MASK_EDGE_DEBUG=0.006;
+// Phase 1.2 clouds: many small, rounded cumulus clusters around the whole globe.
+// Press C to toggle.  Generated deterministically so the world looks the same on reload.
+const CLOUD_BANKS=[];
+function buildGlobalRoundCloudBanks(){
+  if(CLOUD_BANKS.length) return;
+  function rnd(seed){let x=Math.sin(seed*12.9898)*43758.5453; return x-Math.floor(x);}
+  const total=74;
+  for(let i=0;i<total;i++){
+    const u=rnd(1000+i*17), v=rnd(2000+i*23);
+    const lon=-180+360*u;
+    // Uniform on a sphere, but avoid the extreme poles so clouds don't bunch at the texture seam.
+    const lat=THREE.MathUtils.radToDeg(Math.asin(-0.82+1.64*v));
+    const sizeRoll=rnd(3000+i*29);
+    const r=sizeRoll<0.68 ? 0.30+rnd(4000+i*31)*0.12 : sizeRoll<0.93 ? 0.42+rnd(5000+i*37)*0.14 : 0.58+rnd(6000+i*41)*0.12;
+    const roundness=0.88+rnd(7000+i*43)*0.18;
+    CLOUD_BANKS.push({
+      name:'global rounded cloud '+i,
+      lat, lon,
+      rx:r,
+      ry:r*roundness,
+      count:8+Math.floor(rnd(8000+i*47)*12),
+      alt:1.34+rnd(9000+i*53)*0.28
+    });
+  }
+}
+const earthR=10;
+let radial=new THREE.Vector3(0.20,0.55,0.81).normalize();
+let forward=new THREE.Vector3(0,0,1), right=new THREE.Vector3();
+let altitude=0.76,minAlt=0.30,maxAlt=5.4,speed=0.032,targetSpeed=0.032,maxSpeed=0.115,flyAnimSpeed=1.0;
+// ── Player stats ──────────────────────────────────────────────────────
+let playerHP    = 100;   // 0–100
+let enemyHP     = 100;   // 0–100 — enemy health
+let playerFire  = 100;   // 0–100, fire meter
+const FIRE_DRAIN_RATE   = 40;   // per second while firing
+const FIRE_REFILL_RATE  = 20;   // per second when not firing
+const FIRE_REFILL_DELAY = 5.0;  // seconds after last fire before refill starts
+let   fireLastUsed      = -999; // clock.elapsedTime when space last pressed
+
+// ── Enemy dragon state ─────────────────────────────────────────────────
+let enemyRoot    = null;   // THREE.Group — enemy position/orientation
+let enemyVisual  = null;   // loaded GLB scene (same model)
+let enemyMixer   = null;
+let enemyAction  = null;
+let enemyFire    = null;   // fire breath group (same as player)
+let enemyFireMats= [];
+let enemyMouthBone = null;
+let enemyFireActive= false;
+let enemyFireWorldPos = new THREE.Vector3();
+let enemyFireWorldQuat= new THREE.Quaternion();
+
+// Enemy flight state (mirrors player variables)
+let eRadial  = new THREE.Vector3(-0.20, 0.55, -0.81).normalize();
+let eForward = new THREE.Vector3(0,0,1);
+let eRight   = new THREE.Vector3();
+let eAltitude= 0.76;
+let eSpeed   = 0.038;
+// Enemy AI state
+let eFireTimer = 3.0;  // countdown to next fire attempt
+let eIsFiring  = false;
+let eFireDuration = 0;
+let enemyFireMeter = 100;  // same as playerFire — 0–100, drains/refills identically
+let eFireLastUsed  = 0;     // timestamp of last fire use, for refill delay
+// Fire cone damage geometry — derived from the actual widest fire flipbook plane
+// (fire-isometric-diagonal: w=1.68,h=2.55,posY=1.14, see makeFireBreath/addFirePlane),
+// not hand-picked. This guarantees the hit cone, the visible debug cone mesh, and the
+// AI's aim/fire-decision angle all agree with what the flame geometry actually renders.
+//
+// PlaneBufferGeometry is centered on its own origin, so a plane of height h placed at
+// local Y=posY spans [posY-h/2, posY+h/2] before the fireBreath group's own scale is
+// applied. The cone tip sits at the mouth bone (Y=0 in fireBreath-local space), so the
+// reachable depth is the plane's FAR edge: (posY + h/2) * FIRE_BONE_SCALE.
+const FIRE_WIDEST_PLANE = { w:1.68, h:2.55, posY:1.14 }; // fire-isometric-diagonal
+const FIRE_PLANE_FAR_EDGE   = (FIRE_WIDEST_PLANE.posY + FIRE_WIDEST_PLANE.h/2) * FIRE_BONE_SCALE;
+const FIRE_PLANE_HALF_WIDTH = (FIRE_WIDEST_PLANE.w/2) * FIRE_BONE_SCALE;
+// The rendered flame (after shader alpha falloff + sprite content margins) visually
+// occupies roughly 60% of its plane's bounding box — i.e. ~40% smaller than the raw
+// plane geometry. Shrink the reach/radius to match what the player actually sees.
+const FIRE_VISIBLE_SHRINK = 0.60;
+const FIRE_CONE_LEN   = FIRE_PLANE_FAR_EDGE   * FIRE_VISIBLE_SHRINK; // world units, from mouth tip
+const FIRE_CONE_RAD   = FIRE_PLANE_HALF_WIDTH * FIRE_VISIBLE_SHRINK; // world units, at far edge
+const FIRE_CONE_RANGE = 2.8;  // world units — AI engagement range, kept independent of visual cone
+const FIRE_CONE_ANGLE = Math.atan(FIRE_CONE_RAD / FIRE_CONE_LEN); // radians half-angle, consistent with LEN/RAD above
+
+// ── Dragon hit/collision capsule — single source of truth ──────────────────
+// Each sphere anchors to a REAL bone (spine/tail/neck) with a local offset that
+// rotates with that bone every frame — same mechanism already used for WING_CAPSULE.
+//
+// This used to anchor every sphere to dragonRoot with a static forward/radial
+// offset, which assumed the torso/tail were rigid relative to the root. They are
+// NOT: the loaded model plays a continuous "flying" animation clip (mixer.update
+// in animate()) that visibly undulates the spine and whips the tail throughout
+// the flight cycle — confirmed by checking the glTF animation data directly,
+// spine_01's translation alone varies by ~0.02 units across the clip, tail bones
+// move comparably. A static root-relative offset was only ever correct at
+// whatever single instant of the animation happened to match bind pose, wrong
+// the rest of the time — which is what produced the "all collision spheres are
+// below the dragon" symptom: the animated mesh spends most of its time away from
+// the bind-pose position the spheres were frozen at.
+//
+// Radii and rest-pose anchor offsets were measured directly from assets/dragon.glb
+// in bind pose (skinned vertices, same centering/scale normalization loadDragon()
+// applies). Each sphere's center was matched to its nearest real bone (sub-1cm for
+// every tail/neck/most-spine sphere; the body0/pelvis sphere sits in a transition
+// zone between the tail and spine chains and is the one weaker match at ~0.028
+// units, anchored to spine_01 since it's the torso side of that joint), then
+// re-expressed as a LOCAL offset from that bone so it rotates correctly with the
+// bone during animation, exactly like WING_CAPSULE's offsets.
+//
+// BONE NAME GOTCHA: the `bone` strings below have had their dots stripped
+// (e.g. "tail_30.212" in the raw glTF JSON becomes "tail_30212" at runtime),
+// because GLTFLoader sanitizes every node name via PropertyBinding.sanitizeNodeName(),
+// which removes any character outside [A-Za-z0-9_-]. Copying a bone name straight
+// from glTF JSON without stripping dots first will make getObjectByName() silently
+// return null for every entry — this is exactly what happened the first time this
+// table was built, and looked identical to a live-tracking bug (all spheres
+// collapsing to dragonRoot.position) until checked against console output.
+const DRAGON_CAPSULE = [
+  // tail, ordered tip → base
+  { part:'tail', bone:'tail_30212', offset:new THREE.Vector3(-0.0000,-0.0005,-0.0000), r:0.0198 },
+  { part:'tail', bone:'tail_28210', offset:new THREE.Vector3(-0.0049,-0.0004,-0.0000), r:0.0229 },
+  { part:'tail', bone:'tail_25207', offset:new THREE.Vector3(-0.0006,-0.0008,-0.0000), r:0.0239 },
+  { part:'tail', bone:'tail_22204', offset:new THREE.Vector3( 0.0009,-0.0007,-0.0000), r:0.0239 },
+  { part:'tail', bone:'tail_19201', offset:new THREE.Vector3( 0.0017,-0.0007,-0.0000), r:0.0225 },
+  { part:'tail', bone:'tail_16198', offset:new THREE.Vector3( 0.0011, 0.0052,-0.0000), r:0.0236 },
+  { part:'tail', bone:'tail_12194', offset:new THREE.Vector3( 0.0046, 0.0055,-0.0000), r:0.0229 },
+  { part:'tail', bone:'tail_09191', offset:new THREE.Vector3( 0.0043, 0.0048,-0.0000), r:0.0251 },
+  { part:'tail', bone:'tail_07189', offset:new THREE.Vector3(-0.0073, 0.0061,-0.0000), r:0.0244 },
+  { part:'tail', bone:'tail_03185', offset:new THREE.Vector3(-0.0017, 0.0121,-0.0000), r:0.0313 },
+  // torso, ordered rear (pelvis) → forward (neck base)
+  { part:'body', bone:'spine_016',  offset:new THREE.Vector3(-0.0001,-0.0292, 0.0000), r:0.0499 },
+  { part:'body', bone:'spine_0712', offset:new THREE.Vector3(-0.0042,-0.0007, 0.0000), r:0.0561 },
+  { part:'body', bone:'neck_0720',  offset:new THREE.Vector3( 0.0013, 0.0024, 0.0000), r:0.0353 },
+  // head, at the fireBreath/jaw bone's nearest neck anchor
+  { part:'head', bone:'neck_1124',  offset:new THREE.Vector3( 0.0042,-0.0066, 0.0000), r:0.0315 },
+];
+
+// Scratch vectors for the same live bone-tracking pattern getWingCapsuleSpheres
+// already uses — bone world position + world quaternion, local offset rotated
+// into world space by that quaternion, same as the existing fireBreath mouth anchor.
+const _capsuleWorldPos=new THREE.Vector3(), _capsuleWorldQuat=new THREE.Quaternion(), _capsuleLocalOffset=new THREE.Vector3();
+
+// Finds and caches the real bone reference for every DRAGON_CAPSULE entry on a
+// given model root (dragonVisual or enemyVisual). Call once at load time, same
+// pattern as findWingBones/findMouthBone/findNeckBone. Falls back to null per-bone
+// if a different model is loaded — missing bones are skipped, not guessed.
+function findCapsuleBones(root){
+  return DRAGON_CAPSULE.map(s => ({ ...s, boneRef: root.getObjectByName(s.bone) || null }));
+}
+
+// Returns the 14 world-space {center, radius} spheres for a dragon, given its
+// cached findCapsuleBones() result. Reused for player and enemy, debug viz, fire
+// damage, and push-apart. Pass a persistent outArr (e.g. _playerCapsuleScratch) to
+// reuse the same Vector3/wrapper objects across frames instead of allocating new
+// ones every call. Falls back to rootObj-relative placement (no live animation
+// tracking) for any entry whose bone wasn't found, rather than dropping it entirely.
+function getDragonCapsuleSpheres(capsuleBoneRefs, rootObj, outArr){
+  const out = outArr || [];
+  for(let i=0;i<capsuleBoneRefs.length;i++){
+    const s = capsuleBoneRefs[i];
+    let entry = out[i];
+    if(!entry){ entry = { center:new THREE.Vector3(), radius:0, part:s.part }; out[i]=entry; }
+    if(s.boneRef){
+      s.boneRef.updateWorldMatrix(true,false);
+      s.boneRef.getWorldPosition(_capsuleWorldPos);
+      s.boneRef.getWorldQuaternion(_capsuleWorldQuat);
+      _capsuleLocalOffset.copy(s.offset).applyQuaternion(_capsuleWorldQuat);
+      entry.center.copy(_capsuleWorldPos).add(_capsuleLocalOffset);
+    } else if(rootObj){
+      // Fallback for models missing this bone: place relative to root, no live
+      // animation tracking, better than silently omitting the sphere entirely.
+      entry.center.copy(rootObj.position);
+    }
+    entry.radius = s.r;
+  }
+  out.length = capsuleBoneRefs.length;
+  return out;
+}
+
+// ── Wing hit spheres — live-tracked, since wings flap and a static offset from
+// dragonRoot would drift away from the rendered membrane during animation. ──────
+// Each entry anchors to a real wing bone (found via findWingBones, same pattern as
+// findMouthBone/findNeckBone) with a LOCAL offset that rotates with that bone every
+// frame — identical mechanism to the existing fireBreath mouth anchor.
+// Radii/offsets were measured by isolating wing-membrane vertices in dragon.glb
+// (X-isolated from the torso, |localX|>0.05) and splitting the membrane into 3
+// spanwise bands (inner/mid/outer); each sphere covers that band's full chordwise
+// vertex spread, not just the spar bone's thickness — the membrane is a thin sheet,
+// so these spheres are intentionally larger than the spar itself and slightly
+// bulge past the visual surface rather than leave gaps across the wing.
+const WING_CAPSULE = [
+  { side:'l', bone:'l_forearm74',      offset:new THREE.Vector3( 0.0681,-0.0021,-0.0061), r:0.0738 },
+  { side:'l', bone:'l_wingFlapA_0291', offset:new THREE.Vector3( 0.0223,-0.0015,-0.0123), r:0.0682 },
+  { side:'l', bone:'l_wingFlapA_0493', offset:new THREE.Vector3( 0.0542,-0.0040, 0.0140), r:0.0752 },
+  { side:'r', bone:'r_forearm115',      offset:new THREE.Vector3(-0.0681, 0.0021, 0.0061), r:0.0738 },
+  { side:'r', bone:'r_wingFlapA_02132', offset:new THREE.Vector3(-0.0223, 0.0015, 0.0123), r:0.0682 },
+  { side:'r', bone:'r_wingFlapA_04134', offset:new THREE.Vector3(-0.0542, 0.0040,-0.0140), r:0.0752 },
+];
+// Reused scratch quaternion/vector for wing world-position computation.
+const _wingWorldPos=new THREE.Vector3(), _wingWorldQuat=new THREE.Quaternion(), _wingLocalOffset=new THREE.Vector3();
+
+function findWingBones(root){
+  // Exact names from the rigged dragon.glb skeleton; fall back to null per-bone if a
+  // different model is loaded (wing spheres are simply skipped for that bone, rather
+  // than guessing — wrong wing anchors are worse than no wing hit detection at all).
+  return WING_CAPSULE.map(w => ({ ...w, boneRef: root.getObjectByName(w.bone) || null }));
+}
+
+// Computes the 6 live, world-space wing spheres for one dragon. wingBoneRefs comes
+// from findWingBones(dragonVisual) (cached once at load time, not re-traversed).
+// Skips (does not push) any entry whose bone wasn't found on this model.
+function getWingCapsuleSpheres(wingBoneRefs, outArr){
+  const out = outArr || [];
+  let n = 0;
+  for(let i=0;i<wingBoneRefs.length;i++){
+    const w = wingBoneRefs[i];
+    if(!w.boneRef) continue;
+    w.boneRef.updateWorldMatrix(true,false);
+    w.boneRef.getWorldPosition(_wingWorldPos);
+    w.boneRef.getWorldQuaternion(_wingWorldQuat);
+    _wingLocalOffset.copy(w.offset).applyQuaternion(_wingWorldQuat);
+    let entry = out[n];
+    if(!entry){ entry = { center:new THREE.Vector3(), radius:0, part:'wing' }; out[n]=entry; }
+    entry.center.copy(_wingWorldPos).add(_wingLocalOffset);
+    entry.radius = w.r;
+    n++;
+  }
+  out.length = n;
+  return out;
+}
+
+// ── Dragon-vs-dragon push-apart, full capsule (body+tail+head+wings) ───────────
+// Largest possible reach of any single sphere center+radius from dragonRoot, across
+// both DRAGON_CAPSULE and WING_CAPSULE — derived from the same mesh measurements,
+// not guessed. Two dragons can only possibly overlap if root-to-root distance is
+// under roughly 2x this value, so it's used as a cheap early-out before the full
+// 14+6 vs 14+6 pairwise sweep below.
+const DRAGON_MAX_SPHERE_REACH = 0.44;
+const DRAGON_OVERLAP_CHECK_DIST = 2*DRAGON_MAX_SPHERE_REACH + 0.05;
+
+const _overlapScratchA=[], _overlapScratchB=[], _overlapWingA=[], _overlapWingB=[];
+
+// Returns the deepest-overlapping sphere pair between two dragons, or null if none
+// overlap. rootObjA is dragon A's root Object3D (dragonRoot or enemyRoot), used as
+// the fallback placement for any capsule bone that wasn't found on the model.
+// capsuleBonesA is that dragon's cached findCapsuleBones() result (live bone
+// tracking — see getDragonCapsuleSpheres for why that matters). wingBonesA is the
+// cached findWingBones() result (or null to skip wings). Same for B. Used to drive
+// push-apart direction/magnitude with full mesh accuracy instead of a single
+// root-to-root distance.
+function findDeepestDragonOverlap(rootObjA, capsuleBonesA, wingBonesA, rootObjB, capsuleBonesB, wingBonesB){
+  if(!capsuleBonesA || !capsuleBonesB) return null; // model(s) not finished loading yet
+  const spheresA = getDragonCapsuleSpheres(capsuleBonesA, rootObjA, _overlapScratchA);
+  const spheresB = getDragonCapsuleSpheres(capsuleBonesB, rootObjB, _overlapScratchB);
+  const wingsA = wingBonesA ? getWingCapsuleSpheres(wingBonesA, _overlapWingA) : null;
+  const wingsB = wingBonesB ? getWingCapsuleSpheres(wingBonesB, _overlapWingB) : null;
+
+  let best = null, bestDepth = 0;
+  function testPair(a, b){
+    const d = a.center.distanceTo(b.center);
+    const depth = (a.radius + b.radius) - d;
+    if(depth > bestDepth){
+      bestDepth = depth;
+      best = { centerA:a.center, centerB:b.center, depth, dist:d };
+    }
+  }
+  for(let i=0;i<spheresA.length;i++) for(let j=0;j<spheresB.length;j++) testPair(spheresA[i], spheresB[j]);
+  if(wingsA) for(let i=0;i<wingsA.length;i++) for(let j=0;j<spheresB.length;j++) testPair(wingsA[i], spheresB[j]);
+  if(wingsB) for(let i=0;i<spheresA.length;i++) for(let j=0;j<wingsB.length;j++) testPair(spheresA[i], wingsB[j]);
+  if(wingsA && wingsB) for(let i=0;i<wingsA.length;i++) for(let j=0;j<wingsB.length;j++) testPair(wingsA[i], wingsB[j]);
+
+  return best;
+}
+
+let camYaw=0,camPitch=Math.PI/2,camDist=3.80,dragging=false,mx=0,my=0,keys={};
+// Camera modes: 'top' = top-down (default), 'follow' = classic behind-dragon, 'combat' = over-shoulder
+let camMode='top';
+// Neck look control — mouse in combat mode aims the neck bone
+let neckYaw=0, neckPitch=0;  // radians
+let neckBone=null;
+const NECK_YAW_MAX   = THREE.MathUtils.degToRad(30);
+const NECK_PITCH_MAX = THREE.MathUtils.degToRad(20);
+let collisionDebug=false, debugRoot=null;
+function status(s){statusEl.style.display='block';statusEl.textContent=s;console.log(s)}
+function clamp(x,a,b){return Math.max(a,Math.min(b,x))}
+function tex(url,opts={}){const t=new THREE.TextureLoader().load(url,()=>{},undefined,()=>status('Texture load failed: '+url));t.anisotropy=opts.aniso||8;if(opts.srgb)t.encoding=THREE.sRGBEncoding;if(opts.repeat)t.wrapS=t.wrapT=THREE.RepeatWrapping;return t;}
+function init(){
+  scene=new THREE.Scene(); scene.fog=new THREE.FogExp2(0x02040a,0.0017);
+  camera=new THREE.PerspectiveCamera(58,innerWidth/innerHeight,0.03,1000);
+  renderer=new THREE.WebGLRenderer({canvas,antialias:true,powerPreference:'high-performance'});
+  renderer.setSize(innerWidth,innerHeight); renderer.setPixelRatio(Math.min(devicePixelRatio,1.75));
+  renderer.outputEncoding=THREE.sRGBEncoding; renderer.toneMapping=THREE.ACESFilmicToneMapping; renderer.toneMappingExposure=1.08;
+  renderer.shadowMap.enabled=true; renderer.shadowMap.type=THREE.PCFSoftShadowMap;
+  clock=new THREE.Clock();
+  scene.add(new THREE.HemisphereLight(0xcfe8ff,0x101820,1.45));
+  const sun=new THREE.DirectionalLight(0xffffff,2.2); sun.position.set(-18,14,12); scene.add(sun);
+  const fill=new THREE.DirectionalLight(0x92c9ff,0.45); fill.position.set(14,6,-12); scene.add(fill);
+  makeStars(); makeEarth(); makeClouds(); makeDragonFallback(); makeFireBreath(); makeShadow(); loadDragon(); loadDolphins(); resetFlight(); addEvents(); initEnemyDragon(); animate();
+}
+function makeStars(){
+  const g=new THREE.BufferGeometry(), n=1600, arr=new Float32Array(n*3);
+  for(let i=0;i<n;i++){let v=new THREE.Vector3(Math.random()*2-1,Math.random()*2-1,Math.random()*2-1).normalize().multiplyScalar(150+Math.random()*430); arr[i*3]=v.x;arr[i*3+1]=v.y;arr[i*3+2]=v.z;}
+  g.setAttribute('position',new THREE.BufferAttribute(arr,3));
+  scene.add(new THREE.Points(g,new THREE.PointsMaterial({color:0xffffff,size:.54,transparent:true,opacity:.75,sizeAttenuation:true})));
+}
+
+function latLonToDir(lat,lon){
+  const la=THREE.MathUtils.degToRad(lat), lo=THREE.MathUtils.degToRad(lon);
+  return new THREE.Vector3(Math.cos(la)*Math.sin(lo), Math.sin(la), Math.cos(la)*Math.cos(lo)).normalize();
+}
+function makeClouds(){
+  buildGlobalRoundCloudBanks();
+  if(cloudRoot) scene.remove(cloudRoot);
+  if(cloudShadowRoot) scene.remove(cloudShadowRoot);
+  cloudRoot=new THREE.Group(); cloudRoot.name='Phase1_SebStyle_Puff_Clouds'; scene.add(cloudRoot);
+  cloudShadowRoot=new THREE.Group(); cloudShadowRoot.name='Phase1_Cloud_Shadows'; scene.add(cloudShadowRoot);
+
+  // Phase 1.2: compact opaque white cumulus puffs.  The puffs are real lit spheres,
+  // while very soft low-opacity mist sprites inside each bank blur the visible
+  // intersections so the cluster reads as one fluffy cloud instead of separate balls.
+  const puffGeo=new THREE.SphereBufferGeometry(1,20,14);
+  _puffGeo = puffGeo;
+  const mats=[
+    new THREE.MeshLambertMaterial({color:0xffffff,transparent:false,depthWrite:true}),
+    new THREE.MeshLambertMaterial({color:0xf4f6f8,transparent:false,depthWrite:true}),
+    new THREE.MeshLambertMaterial({color:0xe8edf2,transparent:false,depthWrite:true})
+  ];
+  _puffMats = mats;
+  const mistCanvas=document.createElement('canvas');
+  mistCanvas.width=mistCanvas.height=128;
+  const ctx=mistCanvas.getContext('2d');
+  const grad=ctx.createRadialGradient(64,64,8,64,64,64);
+  grad.addColorStop(0.00,'rgba(255,255,255,0.42)');
+  grad.addColorStop(0.42,'rgba(255,255,255,0.24)');
+  grad.addColorStop(0.72,'rgba(255,255,255,0.09)');
+  grad.addColorStop(1.00,'rgba(255,255,255,0.0)');
+  ctx.fillStyle=grad; ctx.fillRect(0,0,128,128);
+  const mistTex=new THREE.CanvasTexture(mistCanvas);
+  const mistMat=new THREE.SpriteMaterial({map:mistTex,color:0xffffff,transparent:true,opacity:0.58,depthWrite:false,depthTest:true});
+
+  // Cloud-bank shadow: one soft local tangent decal per cloud BANK, not per puff.
+  // It follows the same principle as the dragon shadow receiver: a small transparent
+  // surface-hugging mesh aligned to the local Earth tangent. This avoids the previous
+  // shader/global-dot approach and prevents repeated shadows across the planet.
+  const shadowCanvas=document.createElement('canvas');
+  shadowCanvas.width=shadowCanvas.height=256;
+  const sctx=shadowCanvas.getContext('2d');
+  const sgrad=sctx.createRadialGradient(128,128,6,128,128,128);
+  sgrad.addColorStop(0.00,'rgba(0,0,0,0.18)');
+  sgrad.addColorStop(0.38,'rgba(0,0,0,0.105)');
+  sgrad.addColorStop(0.72,'rgba(0,0,0,0.030)');
+  sgrad.addColorStop(1.00,'rgba(0,0,0,0.0)');
+  sctx.fillStyle=sgrad; sctx.fillRect(0,0,256,256);
+  const shadowTex=new THREE.CanvasTexture(shadowCanvas);
+  shadowTex.needsUpdate=true;
+  const shadowMatBase=new THREE.MeshBasicMaterial({
+    map:shadowTex, color:0x000000, transparent:true, opacity:0.42,
+    depthWrite:false, depthTest:true, side:THREE.DoubleSide
+  });
+  const shadowGeo=new THREE.CircleBufferGeometry(1,80);
+
+  function rnd(seed){let x=Math.sin(seed*12.9898)*43758.5453; return x-Math.floor(x);}
+  CLOUD_BANKS.forEach((bank,bi)=>{
+    const center=latLonToDir(bank.lat,bank.lon);
+    const east=new THREE.Vector3(Math.cos(THREE.MathUtils.degToRad(bank.lon)),0,-Math.sin(THREE.MathUtils.degToRad(bank.lon))).normalize();
+    const north=new THREE.Vector3().crossVectors(east,center).normalize();
+    const group=new THREE.Group(); group.name='cloud_'+bank.name; cloudRoot.add(group);
+    // Each cluster drifts slowly in a slightly different wind current around the globe.
+    // Axis is close to planet north/south but tilted so clouds do not all move in perfect latitude bands.
+    group.userData.windAxis=new THREE.Vector3(
+      (rnd((bi+1)*111)-0.5)*0.26,
+      1.0,
+      (rnd((bi+1)*127)-0.5)*0.26
+    ).normalize();
+    group.userData.windSpeed=(0.00030+rnd((bi+1)*139)*0.00042) * (rnd((bi+1)*149)>0.5?1:-1);
+    group.userData.windPhase=rnd((bi+1)*157)*Math.PI*2;
+
+    // One combined footprint for the whole cloud bank. The anchor is the bank center,
+    // not individual puffs, so shadows stay below the visible cloud mass without dotting.
+    const shadow=new THREE.Mesh(shadowGeo,shadowMatBase.clone());
+    const shadowDir=center.clone();
+    const shadowSurface=shadowDir.clone().multiplyScalar(earthR+0.135);
+    const shadowEast=east.clone();
+    const shadowNorth=north.clone();
+    const shadowBasis=new THREE.Matrix4().makeBasis(shadowEast,shadowNorth,shadowDir);
+    shadow.position.copy(shadowSurface);
+    shadow.quaternion.setFromRotationMatrix(shadowBasis);
+    const shadowScale=Math.max(bank.rx,bank.ry)*(1.30+rnd((bi+1)*811)*0.18);
+    shadow.scale.set(shadowScale,shadowScale*(0.72+rnd((bi+1)*823)*0.16),1);
+    shadow.renderOrder=82;
+    shadow.userData.homeDir=shadowDir.clone();
+    shadow.userData.baseScale=shadow.scale.clone();
+    shadow.userData.isCloudShadow=true;
+    shadow.userData.windAxis=group.userData.windAxis.clone();
+    shadow.userData.windSpeed=group.userData.windSpeed;
+    shadow.userData.windPhase=group.userData.windPhase;
+    shadow.userData.opacityBase=0.24 + rnd((bi+1)*829)*0.06;
+    cloudShadowRoot.add(shadow);
+
+    // Soft interior haze: this is what blurs the seams where puff spheres intersect.
+    const mistCount=Math.max(2,Math.floor(bank.count/7));
+    for(let j=0;j<mistCount;j++){
+      const a=rnd((bi+1)*991+j*37)*Math.PI*2;
+      const rr=Math.sqrt(rnd((bi+1)*887+j*29))*0.68;
+      const x=Math.cos(a)*bank.rx*rr;
+      const y=Math.sin(a)*bank.ry*rr;
+      const d=center.clone().addScaledVector(east,x/earthR).addScaledVector(north,y/earthR).normalize();
+      const pos=d.multiplyScalar(earthR+bank.alt+(rnd((bi+1)*761+j*13)-0.5)*0.07);
+      const mist=new THREE.Sprite(mistMat.clone());
+      mist.position.copy(pos);
+      const s=(0.60+rnd((bi+1)*541+j*17)*0.30)*Math.max(bank.rx,bank.ry)*1.35;
+      mist.scale.set(s,s*(0.88+rnd((bi+1)*557+j*19)*0.16),1);
+      mist.userData.home=pos.clone();
+      group.add(mist);
+    }
+
+    for(let i=0;i<bank.count;i++){
+      const a=rnd((bi+1)*101+i*7)*Math.PI*2;
+      const rr=Math.sqrt(rnd((bi+1)*201+i*11));
+      const x=Math.cos(a)*bank.rx*rr;
+      const y=Math.sin(a)*bank.ry*rr;
+      const d=center.clone().addScaledVector(east,x/earthR).addScaledVector(north,y/earthR).normalize();
+      const alt=bank.alt+(rnd((bi+1)*301+i*13)-0.5)*0.14;
+      const pos=d.multiplyScalar(earthR+alt);
+      const m=mats[i%3];
+      const puff=new THREE.Mesh(puffGeo,m);
+      puff.position.copy(pos);
+
+      // Smaller, rounder puffs with mild variation so clusters stay compact and cumulus-like.
+      const base=0.095+rnd((bi+1)*401+i*17)*0.175;
+      puff.scale.set(
+        base*(0.92+rnd((bi+1)*501+i*19)*0.20),
+        base*(0.86+rnd((bi+1)*601+i*23)*0.22),
+        base*(0.90+rnd((bi+1)*701+i*29)*0.20)
+      );
+      const q=new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,1,0),pos.clone().normalize());
+      puff.quaternion.copy(q);
+      puff.rotateY(a);
+      puff.userData.home=pos.clone();
+      // ── Phase 2 per-puff data ──────────────────────────────────────────
+      puff.userData.bankIdx   = bi;
+      puff.userData.puffIdx   = i;
+      puff.userData.puffR     = Math.max(puff.scale.x, puff.scale.y, puff.scale.z); // bsphere radius
+      puff.userData.homeDir   = pos.clone().normalize();
+      puff.userData.homeAlt   = pos.length() - earthR;
+      // Scatter state
+      puff.userData.scattered    = false;
+      puff.userData.scatterVel   = new THREE.Vector3(); // current velocity
+      puff.userData.scatterLife  = 0;   // 0=resting, >0=scattered, counts up
+      puff.userData.scatterMax   = 3.2 + Math.random()*1.8; // seconds until reform
+      puff.userData.baseScale    = puff.scale.clone();
+      puff.userData.origOpacity  = 1.0; // for fade-out/in
+      group.add(puff);
+    }
+  });
+  status('Phase 1.3 clouds ready: rounded global cumulus clusters with soft shadows and slow wind drift');
+  // ── Phase 2: build per-bank bounding spheres for collision ───────────────
+  buildCloudBoundingSpheres();
+}
+
+// ── Phase 2: bounding sphere builder ────────────────────────────────────────
+// Called once after makeClouds. Uses the IDENTICAL rnd() function and seed sequences
+// as makeClouds so bsphere wind params match the visible cloud groups exactly.
+function buildCloudBoundingSpheres(){
+  // Must match the rnd() used in makeClouds / buildGlobalRoundCloudBanks exactly.
+  function rnd(seed){let x=Math.sin(seed*12.9898)*43758.5453;return x-Math.floor(x);}
+
+  CLOUD_BSPHERES.length=0;
+  CLOUD_BANKS.forEach((bank,bi)=>{
+    const center=latLonToDir(bank.lat,bank.lon);
+
+    // Radius: covers full puff footprint (rx in tangent world-units) +
+    // max puff sphere radius (0.27) + altitude spread (±0.14) + small pad.
+    const footprintR = Math.max(bank.rx, bank.ry) * 1.25; // slightly generous
+    const puffR      = 0.28;   // max puff scale base 0.095+0.175=0.27, round up
+    const altSpread  = 0.15;   // puffs vary ±0.14 in alt
+    const padding    = 0.10;
+    const radius     = footprintR + puffR + altSpread + padding;
+
+    const worldCenter = center.clone().multiplyScalar(earthR + bank.alt);
+
+    // ── Wind params: MUST match makeClouds group.userData exactly ──────────
+    // makeClouds seeds: windAxis uses (bi+1)*111 and (bi+1)*127
+    //                   windSpeed uses (bi+1)*139 and (bi+1)*149 for sign
+    //                   windPhase uses (bi+1)*157
+    const windAxisX = (rnd((bi+1)*111) - 0.5) * 0.26;
+    const windAxisZ = (rnd((bi+1)*127) - 0.5) * 0.26;
+    const windAxis  = new THREE.Vector3(windAxisX, 1.0, windAxisZ).normalize();
+    const windSpeed = (0.00030 + rnd((bi+1)*139)*0.00042) * (rnd((bi+1)*149)>0.5 ? 1 : -1);
+    const windPhase = rnd((bi+1)*157) * Math.PI * 2;
+
+    CLOUD_BSPHERES.push({
+      center:     worldCenter,
+      centerDir:  center.clone(),
+      radius,
+      bankIdx:    bi,
+      windAxis,
+      windSpeed,
+      windPhase,
+      currentCenter: worldCenter.clone(),
+    });
+  });
+  cloudCollisionReady=true;
+  status('Phase 2: '+CLOUD_BSPHERES.length+' cloud bounding spheres built — collision active');
+  // Identify polar cloud banks as snow clouds
+  identifySnowBanks();
+
+  // ── Build per-puff narrow-phase lookup ────────────────────────────────────
+  // Walk the already-built cloudRoot groups and collect every puff mesh
+  // (MeshType objects that have userData.puffIdx set).
+  PUFF_BY_BANK.length=0;
+  for(let bi=0;bi<CLOUD_BANKS.length;bi++) PUFF_BY_BANK.push([]);
+
+  if(cloudRoot){
+    cloudRoot.children.forEach(group=>{
+      group.children.forEach(child=>{
+        if(child.isMesh && child.userData.bankIdx !== undefined){
+          const bi=child.userData.bankIdx;
+          PUFF_BY_BANK[bi].push({
+            mesh:      child,
+            worldPos:  new THREE.Vector3(), // updated each frame
+            radius:    child.userData.puffR,
+          });
+        }
+      });
+    });
+  }
+  let totalPuffs=PUFF_BY_BANK.reduce((s,a)=>s+a.length,0);
+  status('Phase 2 hybrid: '+CLOUD_BSPHERES.length+' bank bspheres + '+totalPuffs+' per-puff narrow-phase entries');
+}
+
+// ── Phase 2: cloud regrowth — banks below MIN_PUFFS grow new puffs ──────────
+const MIN_PUFFS = 3;
+let _regrowthTimer = 0;
+const REGROWTH_INTERVAL = 4.0;
+
+// Spawn `count` new puffs into bank bi, starting at scale 0 and growing in.
+function spawnRegrowthPuffs(bi, count){
+  if(!cloudRoot || !_puffGeo || !_puffMats) return;
+  const bank  = CLOUD_BANKS[bi];
+  const group = cloudRoot.children[bi];
+  const puffs = PUFF_BY_BANK[bi];
+  if(!bank || !group || !puffs) return;
+
+  function rnd(seed){let x=Math.sin(seed*12.9898)*43758.5453;return x-Math.floor(x);}
+
+  const center = latLonToDir(bank.lat, bank.lon);
+  const east   = new THREE.Vector3(
+    Math.cos(THREE.MathUtils.degToRad(bank.lon)), 0,
+    -Math.sin(THREE.MathUtils.degToRad(bank.lon))
+  ).normalize();
+  const north  = new THREE.Vector3().crossVectors(east, center).normalize();
+
+  for(let n = 0; n < count; n++){
+    const a   = Math.random() * Math.PI * 2;
+    const rr  = Math.sqrt(Math.random());
+    const x   = Math.cos(a) * bank.rx * rr;
+    const y   = Math.sin(a) * bank.ry * rr;
+    const d   = center.clone()
+      .addScaledVector(east,  x / earthR)
+      .addScaledVector(north, y / earthR)
+      .normalize();
+    const alt = bank.alt + (Math.random()-0.5)*0.14;
+    const pos = d.clone().multiplyScalar(earthR + alt);
+
+    const base    = 0.095 + Math.random()*0.175;
+    const newPuff = new THREE.Mesh(_puffGeo, _puffMats[Math.floor(Math.random()*3)]);
+    newPuff.position.copy(pos);
+    newPuff.scale.set(0,0,0); // start invisible, grows via puff animation
+
+    const q = new THREE.Quaternion()
+      .setFromUnitVectors(new THREE.Vector3(0,1,0), pos.clone().normalize());
+    newPuff.quaternion.copy(q);
+    newPuff.rotateY(a);
+
+    const bs = new THREE.Vector3(
+      base*(0.92+Math.random()*0.20),
+      base*(0.86+Math.random()*0.22),
+      base*(0.90+Math.random()*0.20)
+    );
+    newPuff.userData.home       = pos.clone();
+    newPuff.userData.bankIdx    = bi;
+    newPuff.userData.puffIdx    = puffs.length;
+    newPuff.userData.puffR      = Math.max(bs.x, bs.y, bs.z);
+    newPuff.userData.homeDir    = pos.clone().normalize();
+    newPuff.userData.homeAlt    = alt;
+    newPuff.userData.scattered  = true;    // use scatter Phase B to grow in
+    newPuff.userData.dead       = false;
+    newPuff.userData.scatterVel = new THREE.Vector3();
+    newPuff.userData.scatterLife= 1.2;     // skip Phase A, go straight to puff-up
+    newPuff.userData.scatterMax = 3.0 + Math.random()*2.0;
+    newPuff.userData.baseScale  = bs;
+    newPuff.userData.lastTick   = clock.elapsedTime;
+
+    group.add(newPuff);
+    puffs.push({ mesh: newPuff, worldPos: new THREE.Vector3(), radius: newPuff.userData.puffR });
+  }
+}
+
+// Periodic check: catches any edge cases the immediate trigger missed
+function updateCloudRegrowth(dt){
+  if(!cloudCollisionReady || !cloudRoot || !_puffGeo || !_puffMats) return;
+  _regrowthTimer += dt;
+  if(_regrowthTimer < REGROWTH_INTERVAL) return;
+  _regrowthTimer = 0;
+
+  CLOUD_BANKS.forEach((bank, bi)=>{
+    const puffs = PUFF_BY_BANK[bi];
+    if(!puffs) return;
+    // Exclude dead AND currently scattered (both invisible to the player)
+    const alive  = puffs.filter(pe=>pe.mesh && !pe.mesh.userData.dead && !pe.mesh.userData.scattered).length;
+    const needed = Math.max(0, MIN_PUFFS - alive);
+    if(needed > 0) spawnRegrowthPuffs(bi, needed);
+  });
+}
+
+
+// ── Phase 3: Weather system ──────────────────────────────────────────────────
+
+function initWeather(){
+  if(_weatherInitDone || !cloudRoot) return;
+  _weatherInitDone = true;
+
+  // Build per-bank weather state
+  for(let bi=0;bi<CLOUD_BANKS.length;bi++){
+    const isPolar = _snowBanks.has(bi);
+    WEATHER.push({
+      raining:       false,
+      lightning:     false,
+      rainTimer:     0,
+      lightningTimer: 2 + Math.random()*4,
+      lightningFlashT: -1,
+      rainParticles: null,
+      lightningGroup: null,
+      snowParticles: null,
+      // Snow timers — only used for polar banks, staggered so they don't all fire at once
+      snowTimer:  isPolar ? (20 + Math.random()*80) : -1,
+      snowActive: false,
+    });
+  }
+  reshuffleStorms();
+}
+
+function reshuffleStorms(){
+  // Randomly pick 2–6 banks to be storm clouds
+  const count = STORM_COUNT_MIN + Math.floor(Math.random()*(STORM_COUNT_MAX-STORM_COUNT_MIN+1));
+  const indices = Array.from({length:CLOUD_BANKS.length},(_,i)=>i);
+  // Fisher-Yates shuffle then take first `count`
+  for(let i=indices.length-1;i>0;i--){
+    const j=Math.floor(Math.random()*(i+1));
+    [indices[i],indices[j]]=[indices[j],indices[i]];
+  }
+  const prev = new Set(_stormBanks);
+  _stormBanks = new Set(indices.slice(0,count));
+
+  // Darken puffs of new storm banks, restore old ones
+  _stormBanks.forEach(bi=>{
+    if(!prev.has(bi)) darkenCloud(bi, true);
+  });
+  prev.forEach(bi=>{
+    if(!_stormBanks.has(bi)) darkenCloud(bi, false);
+  });
+}
+
+function darkenCloud(bi, dark){
+  if(!cloudRoot || !cloudRoot.children[bi]) return;
+  const group = cloudRoot.children[bi];
+  group.children.forEach(child=>{
+    const mat = child.material;
+    if(!mat) return;
+    // Cover both solid Mesh puffs and mist Sprites
+    if(!child.userData._origColor){
+      child.userData._origColor = mat.color ? mat.color.clone() : new THREE.Color(1,1,1);
+    }
+    if(dark){
+      if(!child.userData._matCloned){
+        child.material = mat.clone();
+        child.userData._matCloned = true;
+      }
+  child.material.color.setRGB(0.22, 0.23, 0.26); // dark nimbostratus grey
+    } else {
+      if(child.userData._origColor && child.userData._matCloned){
+        child.material.color.copy(child.userData._origColor);
+      }
+    }
+  });
+}
+
+// Build rain particle system anchored to a cloud bank's current world position
+function makeRainForBank(bi){
+  const w = WEATHER[bi];
+  if(w.rainParticles) return; // already exists
+
+  const DROP_COUNT = 180;
+  const positions  = new Float32Array(DROP_COUNT * 6); // 2 pts per drop
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(positions,3));
+  const idx = new Uint16Array(DROP_COUNT*2);
+  for(let i=0;i<DROP_COUNT;i++){idx[i*2]=i*2;idx[i*2+1]=i*2+1;}
+  geo.setIndex(new THREE.BufferAttribute(idx,1));
+  geo.setDrawRange(0, DROP_COUNT*2);
+
+  const mat = new THREE.LineBasicMaterial({
+    color:0x8ab4cc, transparent:true, opacity:0.45,
+    blending:THREE.AdditiveBlending, depthWrite:false,
+  });
+  const particles = new THREE.LineSegments(geo, mat);
+  particles.userData.dropPositions = [];
+  particles.userData.dropVelocities = [];
+  for(let i=0;i<DROP_COUNT;i++){
+    // Start at cloud base (Y=0) spread randomly across footprint, stagger height
+    particles.userData.dropPositions.push(new THREE.Vector3(
+      (Math.random()-0.5)*1.0,
+      -(Math.random()*1.5),   // start already at various depths below cloud base
+      (Math.random()-0.5)*1.0
+    ));
+    // Fall radially inward (local -Y = toward Earth surface)
+    particles.userData.dropVelocities.push(new THREE.Vector3(
+      (Math.random()-0.5)*0.01,
+      -(0.9+Math.random()*0.5),
+      (Math.random()-0.5)*0.01
+    ));
+  }
+  scene.add(particles);
+  w.rainParticles = particles;
+}
+
+function removeRainForBank(bi){
+  const w = WEATHER[bi];
+  if(!w.rainParticles) return;
+  scene.remove(w.rainParticles);
+  w.rainParticles.geometry.dispose();
+  w.rainParticles.material.dispose();
+  w.rainParticles = null;
+}
+
+
+// ── Snow cloud system ────────────────────────────────────────────────────
+function identifySnowBanks(){
+  _snowBanks.clear();
+  CLOUD_BANKS.forEach((bank, bi)=>{
+    if(Math.abs(bank.lat) > 45){
+      _snowBanks.add(bi);
+      colorSnowCloud(bi, true);
+    }
+  });
+}
+
+function colorSnowCloud(bi, isSnow){
+  if(!cloudRoot || !cloudRoot.children[bi]) return;
+  const group = cloudRoot.children[bi];
+  group.children.forEach(child=>{
+    const mat = child.material;
+    if(!mat) return;
+    if(!child.userData._origColor){
+      child.userData._origColor = mat.color ? mat.color.clone() : new THREE.Color(1,1,1);
+    }
+    if(isSnow){
+      if(!child.userData._matCloned){
+        child.material = mat.clone();
+        child.userData._matCloned = true;
+      }
+      child.material.color.setRGB(0.58, 0.62, 0.68);
+    } else {
+      if(child.userData._origColor && child.userData._matCloned){
+        child.material.color.copy(child.userData._origColor);
+      }
+    }
+  });
+}
+
+
+function makeSnowForBank(bi){
+  if(!WEATHER[bi] || WEATHER[bi].snowParticles) return;
+  const COUNT = 140;
+  const pos  = new Float32Array(COUNT*3);
+  const velX = new Float32Array(COUNT);
+  const velY = new Float32Array(COUNT);
+  const velZ = new Float32Array(COUNT);
+  for(let i=0;i<COUNT;i++){
+    pos[i*3+0] = (Math.random()-0.5)*1.2;
+    pos[i*3+1] = -(Math.random()*1.8);
+    pos[i*3+2] = (Math.random()-0.5)*1.2;
+    velX[i] = (Math.random()-0.5)*0.015;
+    velY[i] = -(0.22 + Math.random()*0.18); // slow — snow not rain
+    velZ[i] = (Math.random()-0.5)*0.015;
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos,3));
+  const mat = new THREE.PointsMaterial({
+    color:0xddeeff, size:0.055, transparent:true, opacity:0.70,
+    depthWrite:false, blending:THREE.AdditiveBlending, sizeAttenuation:true,
+  });
+  const pts = new THREE.Points(geo, mat);
+  pts.frustumCulled = false;
+  pts.userData.flakeCount = COUNT;
+  pts.userData.velX = velX;
+  pts.userData.velY = velY;
+  pts.userData.velZ = velZ;
+  scene.add(pts);
+  WEATHER[bi].snowParticles = pts;
+}
+
+function removeSnowForBank(bi){
+  if(!WEATHER[bi] || !WEATHER[bi].snowParticles) return;
+  scene.remove(WEATHER[bi].snowParticles);
+  WEATHER[bi].snowParticles.geometry.dispose();
+  WEATHER[bi].snowParticles.material.dispose();
+  WEATHER[bi].snowParticles = null;
+}
+
+
+// Generate a jagged lightning bolt between two 3D points
+function makeBoltPoints(start, end, offset, depth){
+  if(depth===0) return [start.clone(),end.clone()];
+  const mid = start.clone().lerp(end,0.5+(Math.random()-0.5)*0.3);
+  const perp = new THREE.Vector3(Math.random()-0.5,Math.random()-0.15,Math.random()-0.5).normalize();
+  mid.addScaledVector(perp, offset*(Math.random()*0.8+0.2));
+  return [...makeBoltPoints(start,mid,offset*0.55,depth-1),
+          ...makeBoltPoints(mid,end,offset*0.55,depth-1)];
+}
+
+function spawnLightningForBank(bi, t){
+  const w = WEATHER[bi];
+  const bs = CLOUD_BSPHERES[bi];
+  if(!bs) return;
+
+  // Clear old bolt
+  if(w.lightningGroup){ scene.remove(w.lightningGroup); w.lightningGroup=null; }
+
+  const boltGroup = new THREE.Group();
+  // Start at cloud centre, end 1.5 units toward Earth surface
+  const startPos = bs.currentCenter.clone();
+  const toSurface = startPos.clone().normalize().negate();
+  const endPos = startPos.clone().addScaledVector(toSurface, 1.4 + Math.random()*0.6);
+
+  const pts = makeBoltPoints(startPos, endPos, 0.18, 5);
+  const positions = [];
+  pts.forEach(p=>positions.push(p.x,p.y,p.z));
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions,3));
+
+  // Core white bolt
+  boltGroup.add(new THREE.Line(geo.clone(),
+    new THREE.LineBasicMaterial({color:0xffffff,transparent:true,opacity:0.95,
+      blending:THREE.AdditiveBlending,depthWrite:false})));
+  // Blue glow
+  boltGroup.add(new THREE.Line(geo.clone(),
+    new THREE.LineBasicMaterial({color:0x88aaff,transparent:true,opacity:0.55,
+      blending:THREE.AdditiveBlending,depthWrite:false})));
+
+  // 1–2 random branches
+  const branchCount = 1 + Math.floor(Math.random()*2);
+  for(let b=0;b<branchCount;b++){
+    const bIdx = Math.floor(Math.random()*pts.length*0.6+pts.length*0.15);
+    const bStart = pts[Math.min(bIdx,pts.length-1)].clone();
+    const bEnd = bStart.clone().addScaledVector(toSurface,0.4+Math.random()*0.4)
+      .addScaledVector(new THREE.Vector3(Math.random()-0.5,0,Math.random()-0.5).normalize(),0.25);
+    const bPts = makeBoltPoints(bStart,bEnd,0.08,3);
+    const bPos=[]; bPts.forEach(p=>bPos.push(p.x,p.y,p.z));
+    const bGeo=new THREE.BufferGeometry();
+    bGeo.setAttribute('position',new THREE.Float32BufferAttribute(bPos,3));
+    boltGroup.add(new THREE.Line(bGeo,
+      new THREE.LineBasicMaterial({color:0x8899ff,transparent:true,opacity:0.4,
+        blending:THREE.AdditiveBlending,depthWrite:false})));
+  }
+
+  scene.add(boltGroup);
+  w.lightningGroup = boltGroup;
+  w.lightningFlashT = t;
+
+  // Screen flash only if dragon is currently inside this storm cloud
+  const dragonInThisCloud = insideCloudBanks.includes(bi);
+  if(dragonInThisCloud && _flashEl){
+    _flashEl.style.opacity='0.45';
+    _flashEl.style.transition='opacity 0s';
+    setTimeout(()=>{
+      _flashEl.style.transition='opacity 0.5s';
+      _flashEl.style.opacity='0';
+    },80);
+  }
+}
+
+// Temporarily brighten (t=1→white) or restore (t=0→storm grey) cloud puffs
+function flashCloudPuffs(bi, t){
+  if(!cloudRoot || !cloudRoot.children[bi]) return;
+  cloudRoot.children[bi].children.forEach(child=>{
+    if(!child.material || !child.userData._matCloned) return;
+    const grey = 0.22 + t*(1.0 - 0.22); // lerp from storm grey to white
+    child.material.color.setRGB(grey, grey + t*0.02, grey + t*0.04);
+  });
+}
+
+function updateWeather(dt, t){
+  if(!_weatherInitDone) initWeather();
+  if(!cloudsVisible){ _weatherHudEl.style.display='none'; return; }
+
+  _stormReshuffleTimer += dt;
+  if(_stormReshuffleTimer >= STORM_RESHUFFLE_INTERVAL){
+    _stormReshuffleTimer = 0;
+    reshuffleStorms();
+  }
+
+  let anyStorm = false;
+
+  _stormBanks.forEach(bi=>{
+    const w = WEATHER[bi];
+    const bs = CLOUD_BSPHERES[bi];
+    if(!bs) return;
+    anyStorm = true;
+
+    // ── Rain ──────────────────────────────────────────────────────────────
+    if(!w.rainParticles) makeRainForBank(bi);
+    const rp = w.rainParticles;
+    if(rp){
+      // Anchor at cloud BASE — shift currentCenter radially inward by puff radius
+      // so drops start from the bottom of the cloud, not the middle
+      const cloudBase = bs.currentCenter.clone()
+        .addScaledVector(bs.currentCenter.clone().normalize(), -0.28);
+      rp.position.copy(cloudBase);
+      // Orient so local -Y points toward Earth (radially inward)
+      const up = bs.currentCenter.clone().normalize();
+      rp.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0), up);
+
+      const posArr = rp.geometry.attributes.position.array;
+      const drops  = rp.userData.dropPositions;
+      const vels   = rp.userData.dropVelocities;
+      const DROP_LEN = 0.09;
+
+      for(let i=0;i<drops.length;i++){
+        drops[i].addScaledVector(vels[i], dt);
+        // Reset drop when it falls far enough below cloud base
+        if(drops[i].y < -1.8){
+          drops[i].set(
+            (Math.random()-0.5)*1.0,
+            -Math.random()*0.1,  // respawn just below cloud base (Y=0)
+            (Math.random()-0.5)*1.0
+          );
+        }
+        // Top of streak
+        posArr[i*6+0] = drops[i].x;
+        posArr[i*6+1] = drops[i].y;
+        posArr[i*6+2] = drops[i].z;
+        // Bottom of streak (tail along local -Y = toward Earth)
+        posArr[i*6+3] = drops[i].x + vels[i].x*DROP_LEN;
+        posArr[i*6+4] = drops[i].y + vels[i].y*DROP_LEN;
+        posArr[i*6+5] = drops[i].z + vels[i].z*DROP_LEN;
+      }
+      rp.geometry.attributes.position.needsUpdate = true;
+    }
+
+    // ── Lightning ──────────────────────────────────────────────────────────
+    w.lightningTimer -= dt;
+    if(w.lightningTimer <= 0){
+      // Time for a new bolt
+      w.lightningTimer = 3.5 + Math.random()*6.0;
+      spawnLightningForBank(bi, t);
+    }
+
+    // Flash + bolt visibility — multi-flash effect
+    if(w.lightningFlashT >= 0){
+      const age = t - w.lightningFlashT;
+      if(age < 0.05){
+        // First bright flash — light up the cloud puffs
+        if(w.lightningGroup) w.lightningGroup.visible = true;
+        flashCloudPuffs(bi, 1.0); // bright white
+      } else if(age < 0.10){
+        if(w.lightningGroup) w.lightningGroup.visible = false;
+        flashCloudPuffs(bi, 0.55);
+      } else if(age < 0.14){
+        // Secondary flash
+        if(w.lightningGroup) w.lightningGroup.visible = true;
+        flashCloudPuffs(bi, 0.75);
+      } else if(age < 0.55){
+        // Fade out flicker
+        if(w.lightningGroup){
+          w.lightningGroup.visible = Math.random() > 0.35;
+          w.lightningGroup.children.forEach(c=>{
+            if(c.material) c.material.opacity *= 0.92;
+          });
+        }
+        // Gradually dim puffs back to storm grey
+        const fadeT = (age - 0.14) / 0.41; // 0→1
+        const bright = Math.max(0, 0.75 - fadeT*0.75);
+        flashCloudPuffs(bi, bright);
+      } else {
+        // Done — remove bolt, restore storm grey
+        if(w.lightningGroup){ scene.remove(w.lightningGroup); w.lightningGroup=null; }
+        w.lightningFlashT = -1;
+        flashCloudPuffs(bi, 0); // back to storm grey
+      }
+    }
+  });
+
+  // ── Per-bank snow timers — each polar bank independently starts/stops ────
+  // Exactly like rain: each bank has a snowTimer counting down.
+  // When it fires: if currently snowing → stop and wait; if stopped → start and snow.
+  let anySnow = false;
+  _snowBanks.forEach(bi=>{
+    const w  = WEATHER[bi];
+    const bs = CLOUD_BSPHERES[bi];
+    if(!w || !bs) return;
+
+    // Init timer on first encounter
+    if(w.snowTimer === undefined){
+      w.snowTimer   = 20 + Math.random()*60;  // staggered first start
+      w.snowActive  = false;
+    }
+
+    w.snowTimer -= dt;
+    if(w.snowTimer <= 0){
+      if(!w.snowActive){
+        // Start snowing — lasts 15–90 seconds
+        w.snowActive = true;
+        w.snowTimer  = 15 + Math.random()*75;
+      } else {
+        // Stop — wait 30–180 seconds before next event
+        w.snowActive = false;
+        w.snowTimer  = 30 + Math.random()*150;
+        removeSnowForBank(bi);
+      }
+    }
+
+    if(!w.snowActive) return;
+    anySnow = true;
+
+    // Create particles if needed
+    if(!w.snowParticles) makeSnowForBank(bi);
+    const sp = w.snowParticles;
+    if(!sp) return;
+
+    // Anchor at cloud base
+    const up        = bs.currentCenter.clone().normalize();
+    const cloudBase = bs.currentCenter.clone().addScaledVector(up, -0.28);
+    sp.position.copy(cloudBase);
+    sp.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0), up);
+
+    // Animate flakes
+    const posArr = sp.geometry.attributes.position.array;
+    const n      = sp.userData.flakeCount;
+    for(let i=0;i<n;i++){
+      posArr[i*3+0] += (sp.userData.velX[i] + Math.sin(t*0.8+i*0.31)*0.006)*dt;
+      posArr[i*3+1] +=  sp.userData.velY[i]*dt;
+      posArr[i*3+2] += (sp.userData.velZ[i] + Math.cos(t*0.7+i*0.23)*0.005)*dt;
+      if(posArr[i*3+1] < -1.9){
+        posArr[i*3+0] = (Math.random()-0.5)*1.2;
+        posArr[i*3+1] = -Math.random()*0.1;
+        posArr[i*3+2] = (Math.random()-0.5)*1.2;
+      }
+    }
+    sp.geometry.attributes.position.needsUpdate = true;
+  });
+
+  // Clean up rain for banks that are no longer storms
+  for(let bi=0;bi<CLOUD_BANKS.length;bi++){
+    if(!_stormBanks.has(bi) && WEATHER[bi] && WEATHER[bi].rainParticles){
+      removeRainForBank(bi);
+      darkenCloud(bi, false);
+    }
+  }
+
+  // HUD
+  if(_weatherHudEl){
+    if(anyStorm){
+      _weatherHudEl.style.display='block';
+      _weatherHudEl.textContent = '⛈ '+_stormBanks.size+' storm'+ (_stormBanks.size>1?'s':'')+(anySnow?' ❄':'');
+    } else {
+      _weatherHudEl.style.display='none';
+    }
+  }
+}
+
+function toggleCollisionDebug(){
+ collisionDebug=!collisionDebug;
+ if(!debugRoot){debugRoot=new THREE.Group();scene.add(debugRoot);}
+ debugRoot.visible=collisionDebug;
+ status('Collision Debug: '+(collisionDebug?'ON':'OFF'));
+ if(collisionDebug&&debugRoot){
+   // Clear previous debug meshes
+   while(debugRoot.children.length) debugRoot.remove(debugRoot.children[0]);
+
+   // Dragon collision: full 14-sphere DRAGON_CAPSULE (tail tip → tail base → torso → head),
+   // derived from the actual dragon.glb mesh — see the DRAGON_CAPSULE definition for how.
+   // Color-coded by part so the chain is readable: tail=blue, body=cyan, head=teal.
+   const PART_COLOR={tail:0x3399ff, body:0x00ffff, head:0x00ffaa};
+   DRAGON_CAPSULE.forEach((s,i)=>{
+     const mat=new THREE.MeshBasicMaterial({color:PART_COLOR[s.part]||0x00ffff,wireframe:true,transparent:true,opacity:0.6});
+     const sph=new THREE.Mesh(new THREE.SphereGeometry(s.r,12,6),mat);
+     sph.userData.isDragonCapsuleSphere=true;
+     sph.userData.capsuleIdx=i;
+     debugRoot.add(sph);
+   });
+   // Wing hit spheres (magenta) — live-tracked, only shown if wing bones were found
+   // on the loaded model. Positioned every frame in the animate() loop below, same
+   // as the body/tail/head spheres, but via getWingCapsuleSpheres (bone-anchored).
+   if(playerWingBones){
+     WING_CAPSULE.forEach((w,i)=>{
+       const mat=new THREE.MeshBasicMaterial({color:0xff44ff,wireframe:true,transparent:true,opacity:0.6});
+       const sph=new THREE.Mesh(new THREE.SphereGeometry(w.r,12,6),mat);
+       sph.userData.isWingCapsuleSphere=true;
+       sph.userData.wingIdx=i;
+       debugRoot.add(sph);
+     });
+   }
+   // Phase 2: cloud bounding spheres (yellow wireframe)
+   if(cloudCollisionReady){
+     CLOUD_BSPHERES.forEach(bs=>{
+       const cm=new THREE.Mesh(
+         new THREE.SphereGeometry(bs.radius,14,8),
+         new THREE.MeshBasicMaterial({color:0xffee44,wireframe:true,transparent:true,opacity:0.25})
+       );
+       cm.position.copy(bs.currentCenter);
+       cm.userData.isBSphere=true;
+       cm.userData.bsRef=bs;
+       debugRoot.add(cm);
+     });
+     status('Collision Debug ON — blue/cyan/teal=dragon ('+DRAGON_CAPSULE.length+' spheres), magenta=wings ('+WING_CAPSULE.length+'), yellow=cloud bspheres ('+CLOUD_BSPHERES.length+')');
+   }
+ }
+}
+
+function toggleClouds(){
+  cloudsVisible=!cloudsVisible;
+  if(cloudRoot) cloudRoot.visible=cloudsVisible;
+  if(cloudShadowRoot) cloudShadowRoot.visible=cloudsVisible;
+  status('Clouds: '+(cloudsVisible?'ON':'OFF'));
+}
+function updateClouds(t){
+  if(!cloudRoot) return;
+  const tmpQ=new THREE.Quaternion();
+
+  // Slow wind-current drift: entire cloud clusters rotate subtly around Earth.
+  cloudRoot.children.forEach((g,gi)=>{
+    const ud=g.userData||{};
+    if(ud.windAxis){
+      tmpQ.setFromAxisAngle(ud.windAxis, ud.windPhase + t*ud.windSpeed);
+      g.quaternion.copy(tmpQ);
+    }
+    g.children.forEach((p,i)=>{
+      const h=p.userData.home;
+      if(!h) return;
+      if(p.userData.dead) return; // permanently gone — skip all animation
+
+      if(p.userData.scattered){
+        // ── Scatter animation ─────────────────────────────────────────────
+        // Phase A (TRAVEL_SECS): fly outward + shrink to zero
+        // Phase B (WAIT_SECS):   invisible, snap back to original home position
+        // Phase C (PUFF_SECS):   puff back up slowly at home
+        const TRAVEL_SECS = 1.0;
+        const WAIT_SECS   = 8.0;  // invisible pause before reappearing
+        const PUFF_SECS   = 3.5;
+        const TOTAL       = TRAVEL_SECS + WAIT_SECS + PUFF_SECS;
+
+        const now = clock.elapsedTime;
+        const dtPuff = Math.min(now - (p.userData.lastTick || (now - 0.016)), 0.05);
+        p.userData.lastTick = now;
+
+        p.userData.scatterLife += dtPuff;
+        const life = p.userData.scatterLife;
+        const vel  = p.userData.scatterVel;
+
+        if(life < TRAVEL_SECS){
+          // ── Phase A: fly outward + shrink to zero ────────────────────────
+          p.position.addScaledVector(vel, dtPuff);
+          vel.multiplyScalar(Math.pow(0.60, dtPuff));
+          const shrinkT = life / TRAVEL_SECS;
+          p.scale.copy(p.userData.baseScale).multiplyScalar(Math.max(0, 1.0 - shrinkT));
+
+        } else if(life < TRAVEL_SECS + WAIT_SECS){
+          // ── Phase B: invisible — snap back to original home position ─────
+          vel.set(0,0,0);
+          p.scale.set(0,0,0);
+          // Snap position back to the stored original home (before scattering)
+          const origHome = p.userData.origHome || p.userData.home;
+          p.position.copy(origHome);
+
+        } else if(life < TOTAL){
+          // ── Phase C: puff slowly back up at home position ────────────────
+          const puffT = (life - TRAVEL_SECS - WAIT_SECS) / PUFF_SECS;
+          // Ease-in cubic: starts tiny and slow, grows, slight overshoot, settles
+          let scaleMul;
+          if(puffT < 0.7){
+            const e = puffT / 0.7;
+            scaleMul = e * e * e * 1.15;
+          } else {
+            const e = (puffT - 0.7) / 0.3;
+            scaleMul = 1.15 - e * 0.15;
+          }
+          p.scale.copy(p.userData.baseScale).multiplyScalar(Math.max(0, scaleMul));
+
+        } else {
+          // ── Done — back home, full size, resume idle bob ──────────────────
+          p.userData.scattered   = false;
+          p.userData.scatterLife = 0;
+          p.userData.scatterVel.set(0,0,0);
+          p.userData.lastTick    = undefined;
+          // Restore home to original so idle bob runs correctly
+          if(p.userData.origHome) p.userData.home = p.userData.origHome.clone();
+          p.scale.copy(p.userData.baseScale);
+        }
+
+      } else {
+        // Normal idle bob (Phase 1 behaviour)
+        const d=h.clone().normalize();
+        p.position.copy(h).addScaledVector(d,Math.sin(t*0.18+gi*1.7+i*.37)*0.018);
+      }
+
+      // Update world position cache for narrow-phase collision (used by updateCloudCollision)
+      if(p.userData.bankIdx !== undefined){
+        p.getWorldPosition(
+          PUFF_BY_BANK[p.userData.bankIdx]?.[p.userData.puffIdx]?.worldPos || new THREE.Vector3()
+        );
+      }
+    });
+  });
+
+  // Cloud shadows: one local tangent decal per cloud bank.
+  if(cloudShadowRoot){
+    const camDir=camera.position.clone().normalize();
+    cloudShadowRoot.children.forEach((sh,i)=>{
+      const ud=sh.userData||{};
+      if(!ud.homeDir||!ud.windAxis) return;
+      tmpQ.setFromAxisAngle(ud.windAxis, ud.windPhase + t*ud.windSpeed);
+      const dir=ud.homeDir.clone().applyQuaternion(tmpQ).normalize();
+      const pos=dir.clone().multiplyScalar(earthR+0.135);
+      let east=new THREE.Vector3(0,1,0).cross(dir);
+      if(east.lengthSq()<0.0001) east.set(1,0,0).cross(dir);
+      east.normalize();
+      const north=new THREE.Vector3().crossVectors(dir,east).normalize();
+      const basis=new THREE.Matrix4().makeBasis(east,north,dir);
+      sh.position.copy(pos);
+      sh.quaternion.setFromRotationMatrix(basis);
+      const facing=dir.dot(camDir);
+      sh.visible=facing>-0.08 && cloudsVisible;
+      const breathe=0.88+0.07*Math.sin(t*0.10+i*0.73);
+      sh.scale.set(ud.baseScale.x*breathe,ud.baseScale.y*(0.96+0.04*Math.sin(t*0.07+i)),1);
+      sh.material.opacity=ud.opacityBase*(0.86+0.10*Math.sin(t*0.11+i*0.73));
+    });
+  }
+
+  // ── Phase 2: update bounding sphere world positions to match wind drift ──
+  if(cloudCollisionReady){
+    CLOUD_BSPHERES.forEach(bs=>{
+      tmpQ.setFromAxisAngle(bs.windAxis, bs.windPhase + t*bs.windSpeed);
+      bs.currentCenter.copy(bs.centerDir).applyQuaternion(tmpQ)
+        .multiplyScalar(earthR + CLOUD_BANKS[bs.bankIdx].alt);
+    });
+  }
+}
+
+// ── Phase 2: dragon–cloud collision detection & response ─────────────────────
+// Called from animate() every frame after updateFlight so dragonRoot.position is fresh.
+const _cloudFogEl=document.getElementById('cloudFog');
+const _cloudHudEl=document.getElementById('cloudH');
+const _tmpV3=new THREE.Vector3();
+const _tmpV3b=new THREE.Vector3();
+const _tmpV3c=new THREE.Vector3();
+
+function updateCloudCollision(dt){
+  if(!cloudCollisionReady || !cloudsVisible) {
+    // If clouds off, clear any fog immediately
+    inCloudDepth=0; cloudFogTarget=0;
+    _cloudFogEl.style.opacity='0';
+    if(_cloudHudEl) _cloudHudEl.textContent='☁ Clear';
+    return;
+  }
+
+  const dragonPos=dragonRoot.position;
+  // Dragon collision: 3-sphere capsule matching the debug visualization
+  // body=centre, head=forward+0.32, tail=backward-0.28
+  const dragonBody = _tmpV3b.copy(dragonPos).addScaledVector(radial, 0.20);
+  const dragonHead = _tmpV3c.copy(dragonPos).addScaledVector(forward,0.32).addScaledVector(radial,0.24);
+  const dragonTail = _tmpV3.copy(dragonPos).addScaledVector(forward,-0.28).addScaledVector(radial,0.12);
+  const BODY_R=0.28, HEAD_R=0.18, TAIL_R=0.14;
+
+  cloudTurbulenceAccum.set(0,0,0);
+  insideCloudBanks=[];
+  let maxDepth=0;
+
+  CLOUD_BSPHERES.forEach(bs=>{
+    // Test all 3 dragon spheres against this cloud bsphere
+    const distBody=_tmpV3.copy(dragonBody).sub(bs.currentCenter).length();
+    const distHead=_tmpV3.copy(dragonHead).sub(bs.currentCenter).length();
+    const distTail=_tmpV3.copy(dragonTail).sub(bs.currentCenter).length();
+
+    const overlapBody = distBody < bs.radius + BODY_R;
+    const overlapHead = distHead < bs.radius + HEAD_R;
+    const overlapTail = distTail < bs.radius + TAIL_R;
+
+    if(overlapBody || overlapHead || overlapTail){
+      // Depth: use the deepest penetrating sphere
+      let depth=0;
+      if(overlapBody) depth=Math.max(depth, clamp(1-(distBody/(bs.radius+BODY_R)),0,1));
+      if(overlapHead) depth=Math.max(depth, clamp(1-(distHead/(bs.radius+HEAD_R)),0,1));
+      if(overlapTail) depth=Math.max(depth, clamp(1-(distTail/(bs.radius+TAIL_R)),0,1));
+
+      maxDepth=Math.max(maxDepth,depth);
+      insideCloudBanks.push(bs.bankIdx);
+
+      // ── Narrow phase: per-puff scatter ──────────────────────────────────
+      // Storm clouds and snow clouds do NOT scatter — too dense/heavy
+      const isStorm = _stormBanks && _stormBanks.has(bs.bankIdx);
+      const isSnowCloud = _snowBanks && _snowBanks.has(bs.bankIdx);
+      const puffs = PUFF_BY_BANK[bs.bankIdx];
+      if(!isStorm && !isSnowCloud && puffs && puffs.length){
+        // Refresh world positions for this bank's puffs right now
+        const group = cloudRoot.children[bs.bankIdx];
+        if(group){
+          puffs.forEach(pe=>{
+            if(!pe.mesh || pe.mesh.userData.scattered || pe.mesh.userData.dead) return;
+            pe.mesh.getWorldPosition(pe.worldPos);
+
+            // Test each dragon capsule sphere against this puff
+            const pr = pe.radius;
+            const hitBody = pe.worldPos.distanceTo(dragonBody) < pr + BODY_R;
+            const hitHead = pe.worldPos.distanceTo(dragonHead) < pr + HEAD_R;
+            const hitTail = pe.worldPos.distanceTo(dragonTail) < pr + TAIL_R;
+
+            if(hitBody || hitHead || hitTail){
+              // ── Launch scatter ──────────────────────────────────────────
+              pe.mesh.userData.scattered   = true;
+              pe.mesh.userData.scatterLife = 0;
+              pe.mesh.userData.lastTick    = clock.elapsedTime;
+              // Store original home so Phase B snaps back to it
+              pe.mesh.userData.origHome    = pe.mesh.userData.home.clone();
+
+              // Use the closest dragon capsule sphere as the impact point
+              const impactPoint = hitHead ? dragonHead
+                                : hitBody ? dragonBody
+                                :           dragonTail;
+
+              // True away-from-impact direction in 3D world space
+              const awayFromImpact = pe.worldPos.clone()
+                .sub(impactPoint).normalize();
+
+              // Add dragon's forward momentum so puffs scatter in the direction
+              // the dragon is travelling (hit from front = scatter forward/sideways)
+              const dragonMomentum = forward.clone().multiplyScalar(speed * 80);
+
+              // Small random perpendicular spread so each puff goes a different way
+              const randPerp = new THREE.Vector3(
+                Math.random()-0.5, Math.random()-0.5, Math.random()-0.5
+              );
+              // Remove radial component from randPerp so spread stays tangential
+              randPerp.addScaledVector(radial, -randPerp.dot(radial)).normalize();
+
+              const scatterDir = awayFromImpact
+                .addScaledVector(dragonMomentum, 0.5)   // inherit dragon direction
+                .addScaledVector(randPerp, 0.4)          // tangential random spread
+                .normalize();
+
+              // Launch speed scales with dragon speed — faster dragon = harder hit = bigger scatter
+              // dragon speed is ~0.004–0.115, scale it up to a useful range
+              const launchSpeed = 0.25 + speed * 8.0 + Math.random()*0.2;
+              pe.mesh.userData.scatterVel.copy(scatterDir).multiplyScalar(launchSpeed);
+
+              // Randomise reform time so they don't all snap back at once
+              pe.mesh.userData.scatterMax = 2.5 + Math.random()*2.5;
+            }
+          });
+        }
+      }
+
+      // ── Turbulence: random nudge perpendicular to radial ─────────────────
+      // Only apply when meaningfully inside (depth > 0.15) to avoid jitter at edges.
+      if(depth>0.15){
+        // Use a deterministic noise pattern based on time + bank index so each
+        // cloud has its own turbulence character. No random() so it's frame-stable.
+        const bi=bs.bankIdx;
+        const tx=Math.sin(clock.elapsedTime*1.8+bi*3.7)*Math.cos(clock.elapsedTime*1.1+bi*2.3);
+        const tz=Math.cos(clock.elapsedTime*2.2+bi*1.9)*Math.sin(clock.elapsedTime*0.9+bi*4.1);
+        // Project onto tangent plane (perpendicular to radial) so we don't push
+        // dragon into or out of the Earth.
+        _tmpV3.set(tx,0,tz);
+        const radialComp=_tmpV3.dot(radial);
+        _tmpV3.addScaledVector(radial,-radialComp); // remove radial component
+        const turbStrength=depth*depth*0.0008; // subtle — max ~0.0008 units/frame
+        cloudTurbulenceAccum.addScaledVector(_tmpV3,turbStrength);
+      }
+    }
+  });
+
+  // ── Smooth fog depth ──────────────────────────────────────────────────────
+  const fogSpeed=maxDepth>inCloudDepth ? 3.5 : 2.0; // enter fast, exit a bit slower
+  inCloudDepth+=(maxDepth-inCloudDepth)*(1-Math.exp(-dt*fogSpeed));
+  inCloudDepth=clamp(inCloudDepth,0,1);
+
+  // ── Apply turbulence to dragon position ───────────────────────────────────
+  if(cloudTurbulenceAccum.lengthSq()>0){
+    dragonRoot.position.add(cloudTurbulenceAccum);
+    // Keep dragon on its sphere shell (re-project onto correct altitude)
+    dragonRoot.position.normalize().multiplyScalar(earthR+altitude);
+    // Also update the radial direction so flight system stays consistent
+    radial.copy(dragonRoot.position).normalize();
+    projectForward();
+  }
+
+  // ── CSS fog overlay ───────────────────────────────────────────────────────
+  // The overlay fades in smoothly. We drive opacity directly (no CSS transition)
+  // for frame-accurate response.
+  const fogOpacity=inCloudDepth*inCloudDepth*0.82; // quadratic: barely visible at edge, thick at centre
+  _cloudFogEl.style.opacity=fogOpacity.toFixed(3);
+
+  // Slight blue-grey tint deepens as we go deeper
+  const r=Math.round(200+inCloudDepth*40);
+  const g=Math.round(210+inCloudDepth*35);
+  const b=Math.round(230+inCloudDepth*20);
+  _cloudFogEl.style.background=
+    `radial-gradient(ellipse at 50% 40%,rgba(${r},${g},${b},0.45) 0%,rgba(${r-20},${g-20},${b-10},0.88) 100%)`;
+
+  // ── HUD update ─────────────────────────────────────────────────────────────
+  if(_cloudHudEl){
+    if(inCloudDepth>0.55){
+      _cloudHudEl.textContent='☁ INSIDE CLOUD';
+      _cloudHudEl.style.color='#aac8ff';
+    } else if(inCloudDepth>0.15){
+      _cloudHudEl.textContent='☁ Entering cloud…';
+      _cloudHudEl.style.color='#ccdff5';
+    } else {
+      _cloudHudEl.textContent='☁ Clear';
+      _cloudHudEl.style.color='';
+    }
+  }
+
+  // ── Scene fog thickens when inside cloud ──────────────────────────────────
+  // Base fog density is 0.0017. We ramp it up to 0.012 at full cloud depth.
+  if(scene.fog) scene.fog.density=0.0017+inCloudDepth*0.011;
+
+  // ── Bloom / exposure effect ───────────────────────────────────────────────
+  // Slightly overbrighten the scene when inside a cloud (realistic bright-white interior).
+  renderer.toneMappingExposure=clamp(1.08+inCloudDepth*0.55, 1.08, 1.65);
+}
+function makeEarth(){
+  const base=tex(ASSET.base,{srgb:true,aniso:12});
+  const nasaAtlas=tex(ASSET.nasaAtlas,{srgb:true,aniso:16});
+  const topo=tex(ASSET.topo,{aniso:8});
+  const heightNormal=tex(ASSET.heightNormal,{aniso:8});
+  const bathy=tex(ASSET.bathy,{aniso:8});
+  const land=tex(ASSET.land,{aniso:8});
+  const coast=tex(ASSET.coast,{aniso:8});
+  const shore=tex(ASSET.shore,{aniso:8});
+  const lakes=tex(ASSET.lakes,{aniso:8});
+  const waveA=tex(ASSET.waveA,{repeat:true,aniso:6});
+  const waveB=tex(ASSET.waveB,{repeat:true,aniso:6});
+  const waterN=tex(ASSET.waterNormal,{repeat:true,aniso:6});
+  const oceanColor=tex(ASSET.oceanColor,{srgb:true,aniso:12});
+  const chloro=tex(ASSET.chloro,{aniso:8});
+  const shallow=tex(ASSET.shallow,{aniso:8});
+  earthMat=new THREE.ShaderMaterial({
+    uniforms:{time:{value:0},baseMap:{value:base},nasaAtlas:{value:nasaAtlas},useNasaTiles:{value:1.0},topoMap:{value:topo},heightNormalMap:{value:heightNormal},landMap:{value:land},coastMap:{value:coast},shoreMap:{value:shore},lakeMap:{value:lakes},waveA:{value:waveA},waterNormal:{value:waterN},oceanColorMap:{value:oceanColor},chloroMap:{value:chloro},shallowMap:{value:shallow},sunDir:{value:new THREE.Vector3(-0.62,0.55,0.45).normalize()},dragonGroundDir:{value:new THREE.Vector3(.20,.55,.81).normalize()},detailBoost:{value:1.0},dragonShimmerStrength:{value:0.55},dragonShadowStrength:{value:0.42},snowCover:{value:new THREE.Vector4(0,0,0,0)}},
+    vertexShader:`
+      varying vec2 vUv; varying vec3 vN; varying vec3 vW; varying float vH; varying float vLand;
+      uniform sampler2D topoMap; uniform sampler2D landMap; uniform sampler2D shoreMap;
+      float L(vec3 c){return dot(c,vec3(.299,.587,.114));}
+      float topoBlur(vec2 uv){
+        vec2 px=vec2(1.0/2048.0,1.0/1024.0);
+        float h=L(texture2D(topoMap,uv).rgb)*.38;
+        h+=L(texture2D(topoMap,uv+vec2(px.x,0.)).rgb)*.155;
+        h+=L(texture2D(topoMap,uv-vec2(px.x,0.)).rgb)*.155;
+        h+=L(texture2D(topoMap,uv+vec2(0.,px.y)).rgb)*.155;
+        h+=L(texture2D(topoMap,uv-vec2(0.,px.y)).rgb)*.155;
+        return h;
+      }
+      void main(){
+        vUv=uv;
+        float lm=texture2D(landMap,uv).r;
+        float land=smoothstep(.34,.50,lm);
+        float shore=texture2D(shoreMap,uv).r;
+        float coastFlatten=smoothstep(.08,.33,shore);
+        float h=topoBlur(uv);
+        // Remap NASA topo into visible but soft game-style relief.
+        h=smoothstep(.035,.50,h);
+        h=pow(h,1.12);
+        vH=h; vLand=land;
+        // Moderate lowland / island uplift: keeps islands above water, but reduces
+        // the previously exaggerated coastal elevation so shorelines feel more natural.
+        float minLandLift = 0.072;
+        float coastalBaseLift = mix(0.038, 0.006, coastFlatten);
+        float raisedRelief = minLandLift + coastalBaseLift + h * 0.300;
+        vec3 p = position + normal * land * raisedRelief;
+        vec4 wp=modelMatrix*vec4(p,1.0);
+        vW=wp.xyz; vN=normalize(normalMatrix*normal);
+        gl_Position=projectionMatrix*viewMatrix*wp;
+      }`,
+    fragmentShader:`
+      precision highp float;
+      varying vec2 vUv; varying vec3 vN; varying vec3 vW; varying float vH; varying float vLand;
+      uniform float time; uniform float detailBoost; uniform float dragonShimmerStrength; uniform float dragonShadowStrength; uniform vec3 sunDir; uniform vec3 dragonGroundDir;
+      uniform vec4 snowCover; // x=north accum, y=south accum, z=unused, w=unused
+      uniform sampler2D baseMap,topoMap,heightNormalMap,landMap,coastMap,shoreMap,lakeMap,waveA,waterNormal,oceanColorMap,chloroMap,shallowMap;
+      uniform sampler2D nasaAtlas;
+      uniform float useNasaTiles;
+      float L(vec3 c){return dot(c,vec3(.299,.587,.114));}
+      vec3 sat(vec3 c,float s){float l=L(c);return mix(vec3(l),c,s);} 
+      vec3 con(vec3 c,float k){return (c-.5)*k+.5;}
+      float rand(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
+      vec3 sampleNasaTile(vec2 uv){
+        // NASA BMNG 8-tile layout packed into a single 8192x4096 atlas.
+        // Atlas columns west->east: A, B, C, D. Rows north->south: 1, 2.
+        // This keeps the tiled quality while using only one sampler, fixing:
+        // MAX_TEXTURE_IMAGE_UNITS(16) shader compile failures.
+        vec2 auv = vec2(clamp(uv.x, 0.0, 1.0), clamp(uv.y, 0.0, 1.0));
+        return texture2D(nasaAtlas, auv).rgb;
+      }
+      vec3 sampleBaseColor(vec2 uv){
+        vec3 low=texture2D(baseMap,uv).rgb;
+        vec3 hi=sampleNasaTile(uv);
+        // The fallback low-res map remains available, but the NASA tile set is now the primary base.
+        return mix(low,hi,clamp(useNasaTiles,0.0,1.0));
+      }
+      vec3 detailContrast(vec3 c){ c=sat(con(c,1.34),1.22); return c; }
+      vec3 triWeights(vec3 n){ vec3 w=pow(abs(n),vec3(4.0)); return w/(w.x+w.y+w.z+0.0001); }
+      void main(){
+        vec3 N=normalize(vN), V=normalize(cameraPosition-vW), S=normalize(sunDir);
+        // Precomputed height-derived normal map from Topo.jpg: gives SebLague-style slope shading
+        // without relying on sharp geometry displacement or expensive per-frame readback.
+        // SebLague-style spherical height normal. This texture is generated once from
+        // neighboring displaced sphere points: normal = cross(north-south, east-west).
+        // It is stored as RGB = normal * 0.5 + 0.5, A = height.
+        vec4 hPack = texture2D(heightNormalMap, vUv);
+        vec3 heightN = normalize(hPack.rgb * 2.0 - 1.0);
+        // Use the mathematically correct spherical terrain normal as the macro normal.
+        // Blend rather than replace so lowlands remain smooth and stylized.
+        N = normalize(mix(N, heightN, 0.74 * texture2D(landMap, vUv).r));
+        float ndl=max(dot(N,S),0.0);
+        float light=.76+.33*ndl+.10*pow(ndl,4.0);
+        float lm=texture2D(landMap,vUv).r;
+        float land=smoothstep(.34,.50,lm);
+        float ocean=1.0-land;
+        float shore=texture2D(shoreMap,vUv).r;
+        float coast=L(texture2D(coastMap,vUv).rgb);
+        
+        float topo=L(texture2D(topoMap,vUv).rgb);
+        float lat=abs(vUv.y-.5)*2.0;
+        vec3 satBase=sat(con(sampleBaseColor(vUv),1.12),1.27);
+        float green=max(satBase.g-max(satBase.r,satBase.b),0.0);
+        float snowMask=max(smoothstep(.72,.92,L(satBase))*0.75, smoothstep(.66,.93,lat)*0.68);
+        snowMask=max(snowMask,smoothstep(.50,.78,vH)*smoothstep(.35,.62,lat));
+        snowMask*=land;
+        float mountain=smoothstep(.30,.78,vH)*land;
+        float desert=smoothstep(.05,.20,satBase.r-satBase.b)*smoothstep(.26,.62,satBase.r)*land*(1.0-snowMask);
+        float forest=smoothstep(.012,.13,green)*land*(1.0-snowMask*.8)*(1.0-desert*.55);
+        vec3 landCol=satBase;
+        landCol=mix(landCol,vec3(.13,.39,.16),forest*.45);
+        landCol=mix(landCol,vec3(.68,.50,.25),desert*.48);
+        landCol=mix(landCol,vec3(.40,.39,.32),mountain*.32*(1.0-snowMask));
+        landCol=mix(landCol,vec3(.90,.91,.86),snowMask*.72);
+        // PBR/triplanar biome detail disabled.
+        // The uploaded PBR atlases caused visible diagonal/grid artifacts on land at low altitude.
+        // Land now uses the high-quality Base/Topo maps plus macro height-normal lighting only.
+        float dBoost = detailBoost * land;
+        vec3 detailN = N;
+        float normalWeight = 0.0;
+        float biomeRoughMix = 0.62;
+        // Soft topo shading without sharp spikes.
+        float ridge=pow(clamp(vH,0.0,1.0),1.12);
+        float fineGrain=(rand(floor(vUv*vec2(2100.0,1050.0)))-.5)*.034*dBoost;
+        landCol*=.86+ridge*.38+fineGrain;
+        // SebLague-style ocean base upgraded with the supplied Ocean / Chloro / Shallow masks.
+        // Ocean.png provides global bathymetry colour; Chloro adds soft biological/coastal variation;
+        // the shallow mask is only a subtle tint, not a broad static shelf band.
+        vec3 deep=vec3(.010,.105,.34);
+        vec3 mid=vec3(.025,.34,.62);
+        vec3 oceanTex=texture2D(oceanColorMap,vUv).rgb;
+        oceanTex=sat(con(oceanTex,1.08),1.16);
+        float oceanLum=L(oceanTex);
+        vec3 proceduralOcean=mix(deep,mid,smoothstep(.05,.55,oceanLum));
+        vec3 water=mix(proceduralOcean,oceanTex,.68);
+        float shallow=L(texture2D(shallowMap,vUv).rgb);
+        float chl=L(texture2D(chloroMap,vUv).rgb);
+        // Keep shallow influence darker/turquoise and conservative so it does not become the old pale band.
+        float shallowWater=ocean*smoothstep(.18,.78,shallow)*(1.0-smoothstep(.72,.98,shallow));
+        water=mix(water, vec3(.018,.34,.56), shallowWater*.18);
+        water+=vec3(-.018,.050,.030) * smoothstep(.10,.72,chl) * ocean * .42;
+        water=mix(water, vec3(.006,.070,.22), ocean*(1.0-smoothstep(.10,.50,oceanLum))*.14);
+        vec2 w1=vUv*vec2(34.,17.)+vec2(time*.020,time*.006);
+        vec2 w2=vUv*vec2(92.,46.)+vec2(-time*.014,time*.018);
+        vec2 w3=vUv*vec2(128.,64.)+vec2(time*.008,-time*.015);
+        float wa=L(texture2D(waveA,w1).rgb), wb=L(texture2D(waveA,w2).rgb);
+        vec3 wn=texture2D(waterNormal,w3).rgb*2.0-1.0;
+        float wave=wa*.42+wb*.38+(wn.z*.5+.5)*.20;
+        vec3 H=normalize(S+V);
+        float spec=pow(max(dot(normalize(N+wn*.15*ocean),H),0.0),88.0)*ocean*(.35+.65*wave);
+        water+=vec3(.030,.085,.135)*(wave-.45);
+        water+=vec3(.68,.92,1.0)*spec*.75;
+
+        // Subtle gameplay shimmer directly beneath the dragon. This is intentionally
+        // separate from the real sun/camera specular above, so the cinematic glint
+        // remains physically plausible while the player still gets a readable
+        // water glimmer at the dragon's ground point.
+        vec3 sphereDir = normalize(vW);
+        float dragonDot = max(dot(sphereDir, normalize(dragonGroundDir)), 0.0);
+        float dragonHot = pow(dragonDot, 520.0);
+        float dragonHalo = pow(dragonDot, 145.0) * 0.28;
+        float dragonRipple = 0.72 + 0.28 * sin(time * 4.2 + wave * 9.0);
+        float dragonWaterShimmer = (dragonHot + dragonHalo) * dragonRipple * dragonShimmerStrength * ocean;
+        water += vec3(.58,.88,1.0) * dragonWaterShimmer;
+        // Crisp shoreline waves generated from the coastline distance field.
+        // Tightened range: the surf is closer to shore and does not extend far offshore.
+        float dstFromShore = shore;
+        float innerFade = smoothstep(0.0012, 0.0032, dstFromShore);
+        float outerFade = 1.0 - smoothstep(0.0075, 0.0145, dstFromShore);
+        float shoreFalloff = innerFade * outerFade;
+        shoreFalloff *= shoreFalloff;
+        float shoreBand = ocean * shoreFalloff;
+
+        // Shoreline wave train: continuous everywhere.
+        // Use a repeating phase ramp instead of a global on/off sine threshold, so foam
+        // bands never disappear after a few waves. Local phase varies by position only.
+        float shoreScale = 260.0;      // spacing between crests; higher = closer bands
+        float scrollSpeed = 0.34;      // slow continuous movement
+
+        // Very low distortion: keeps the wave lines clean and avoids noisy overlap.
+        float shoreNoise = (wave - 0.5) * 0.000003 * shoreFalloff;
+        float distortedDst = max(0.0, dstFromShore + shoreNoise);
+
+        // Smooth spatial phase offset only. This is NOT a timing gate. Every coastline
+        // animates continuously, but different places start at a different wave phase.
+        float phaseA = sin(vUv.x * 31.7 + vUv.y * 19.3);
+        float phaseB = sin(vUv.x * 83.1 - vUv.y * 47.9);
+        float localPhase = (phaseA * 0.65 + phaseB * 0.35) * 0.38;
+
+        // Repeating triangular crest signal. Because it is based on fract(), there is
+        // always a sequence of waves in the shoreline band rather than a few waves then stop.
+        float wavePhase = distortedDst * shoreScale - time * scrollSpeed + localPhase;
+        float crest = 1.0 - abs(fract(wavePhase) - 0.5) * 2.0;
+
+        // Volumetric surf: wider/noisier body plus a bright core.
+        // Noise fattens the lines unevenly so they read as foam volume, not thin vectors.
+        float foamNoiseA = L(texture2D(waveA, vUv * vec2(62.0, 31.0) + vec2(time * 0.010, -time * 0.004)).rgb);
+        float foamNoiseB = L(texture2D(waveA, vUv * vec2(121.0, 58.0) + vec2(-time * 0.006, time * 0.009)).rgb);
+        float foamNoise = foamNoiseA * 0.65 + foamNoiseB * 0.35;
+        float noisyCrest = clamp(crest + (foamNoise - 0.5) * 0.18, 0.0, 1.0);
+        float foamBody = smoothstep(0.54, 0.90, noisyCrest);
+        float foamCore = smoothstep(0.78, 0.975, noisyCrest);
+        float foamWave = clamp(foamBody * 0.48 + foamCore * 0.74, 0.0, 1.0);
+
+        // Break up the foam edge while keeping continuous wave trains.
+        float patchA = L(texture2D(waveA, vUv * vec2(40.0, 20.0) + vec2(time * 0.006, 0.0)).rgb);
+        float surfBreakup = mix(0.88, 1.12, smoothstep(0.34, 0.92, patchA));
+        float foam = shoreBand * foamWave * surfBreakup;
+        vec3 foamWhite = vec3(1.0, 1.0, 1.0);
+        vec3 foamTint = vec3(0.68, 0.92, 1.0);
+        water += foamTint * foam * 0.18;
+        water=mix(water,foamWhite,foam*.72);
+        vec3 col=mix(water,landCol,land);
+
+        // Lakes are applied as a final overlay below, after land/ocean/shore post-processing.
+        // This prevents shallow/coast/lighting passes from covering or darkening them.
+
+        // Thin smooth ink coastline for readability without the broad black shore band.
+        // Coastline ink should not darken/tint the land side of the coast.
+        // Keep the readability line only on ocean pixels so the dark green/grey land halo disappears.
+        float ink=smoothstep(.72,.96,coast) * (1.0-smoothstep(.045,.125,shore)) * ocean;
+        col=mix(col,vec3(.006,.011,.012),ink*.26);
+        col=mix(col,vec3(1.0),foam*.06);
+
+        // Rivers removed; Lakes.png is integrated as the only inland-water overlay.
+        col*=mix(light, .92 + .16*ndl, land);
+        col=sat(con(col,1.08),1.10);
+        col=pow(max(col,0.0),vec3(.92));
+
+        // FINAL LAKE PASS
+        // Draw lakes after all land/ocean/coast effects so they sit visibly on top of terrain.
+        // Do not multiply by landMap or shore distance: those masks can classify inland
+        // water as non-land or fade out anything far from the ocean coastline.
+        float lakeMask = smoothstep(0.10, 0.46, texture2D(lakeMap, vUv).r);
+
+        vec2 lakeUvA = vUv * vec2(82.0, 41.0) + vec2(time * 0.010, -time * 0.006);
+        vec2 lakeUvB = vUv * vec2(37.0, 19.0) + vec2(-time * 0.005, time * 0.008);
+        vec3 lakeWnA = texture2D(waterNormal, lakeUvA).rgb * 2.0 - 1.0;
+        vec3 lakeWnB = texture2D(waterNormal, lakeUvB).rgb * 2.0 - 1.0;
+        vec3 lakeWn = normalize(lakeWnA * 0.65 + lakeWnB * 0.35);
+        vec3 lakeN = normalize(N + lakeWn * 0.34);
+        float lakeRipple = clamp((lakeWn.z * 0.5 + 0.5) * 0.72 + wave * 0.28, 0.0, 1.0);
+
+        vec3 lakeBase = mix(vec3(.006,.075,.200), vec3(.020,.245,.430), lakeRipple*.55+.24);
+        float lakeLight = mix(0.88, 1.15, max(dot(lakeN, S), 0.0));
+        float lakeFacing = max(dot(lakeN, V), 0.0);
+        float lakeFresnel = pow(1.0 - lakeFacing, 3.0);
+        float lakeSpecCore = pow(max(dot(lakeN, H), 0.0), 88.0);
+        float lakeSpecWide = pow(max(dot(lakeN, H), 0.0), 26.0) * 0.24;
+        float lakeSpec = (lakeSpecCore + lakeSpecWide) * (0.42 + 0.58 * lakeRipple);
+        float lakeDragonShimmer = (dragonHot + dragonHalo) * (0.70 + 0.30 * lakeRipple) * dragonShimmerStrength * lakeMask;
+        vec3 lakeCol = lakeBase * lakeLight;
+        lakeCol += mix(vec3(.08,.22,.36), vec3(.78,.94,1.0), lakeFresnel) * lakeFresnel * 0.16;
+        lakeCol += vec3(.70,.93,1.0) * lakeSpec * 0.90;
+        lakeCol += vec3(.62,.90,1.0) * lakeDragonShimmer * 1.05;
+        lakeCol = sat(con(lakeCol, 1.06), 1.08);
+        lakeCol = pow(max(lakeCol,0.0), vec3(.92));
+        col = mix(col, lakeCol, lakeMask * 0.995);
+
+        // FINAL DRAGON SHADOW DECAL
+        // This is intentionally applied after the lake overlay, so lakes cannot cover it.
+        // The real Three.js mesh shadow receiver is still present for animated silhouettes,
+        // but this shader decal guarantees a readable shadow over land and inland lakes.
+        float shadowDot = max(dot(normalize(vW), normalize(dragonGroundDir)), 0.0);
+        float shadowCore = pow(shadowDot, 260.0);
+        float shadowSoft = pow(shadowDot, 82.0) * 0.42;
+        float dragonShadow = clamp((shadowCore + shadowSoft) * dragonShadowStrength, 0.0, 0.55);
+        float landShadowMask = max(land, lakeMask);
+        float shadowOpacity = mix(0.10, 0.34, landShadowMask);
+        shadowOpacity = mix(shadowOpacity, 0.22, lakeMask);
+        col *= (1.0 - dragonShadow * shadowOpacity);
+
+        // ── SNOW ACCUMULATION OVERLAY ──────────────────────────────────────
+        // vUv.y: 0=south pole, 0.5=equator, 1=north pole
+        float latN = smoothstep(0.62, 0.78, vUv.y);
+        float latS = smoothstep(0.38, 0.22, vUv.y);
+        float accumMaskN = latN * snowCover.x * land;
+        float accumMaskS = latS * snowCover.y * land;
+        float accumMask  = clamp(accumMaskN + accumMaskS, 0.0, 1.0);
+        float snowBump   = sin(vUv.x*180.0+time*0.02)*sin(vUv.y*90.0)*0.018;
+        vec3  accumSnowCol = vec3(0.88+snowBump, 0.92+snowBump, 0.97);
+        float highGround = smoothstep(0.28, 0.52, topo) * 0.4 + 0.6;
+        col = mix(col, accumSnowCol, accumMask * highGround);
+
+        gl_FragColor=vec4(col,1.0);
+      }`
+  });
+  earth=new THREE.Mesh(new THREE.SphereBufferGeometry(earthR,320,160),earthMat);
+  scene.add(earth);
+  // A very light specular water shell to make the scrolling ocean normals readable.
+  const shellMat=new THREE.ShaderMaterial({transparent:true,depthWrite:false,uniforms:{time:{value:0},landMap:{value:land},shoreMap:{value:shore},lakeMap:{value:lakes},waveA:{value:waveA}},vertexShader:`varying vec2 vUv;void main(){vUv=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}`,fragmentShader:`precision highp float;varying vec2 vUv;uniform float time;uniform sampler2D landMap,shoreMap,lakeMap,waveA;float L(vec3 c){return dot(c,vec3(.299,.587,.114));}void main(){float land=smoothstep(.34,.50,texture2D(landMap,vUv).r);float ocean=1.0-land;float lake=smoothstep(.10,.46,texture2D(lakeMap,vUv).r);float sh=texture2D(shoreMap,vUv).r;float w=L(texture2D(waveA,vUv*50.0+vec2(time*.02,0.)).rgb)*.5+L(texture2D(waveA,vUv*88.0+vec2(0.,time*.017)).rgb)*.5;float oceanA=ocean*(.006+.020*smoothstep(.10,.70,sh))*smoothstep(.62,.92,w);float lakeA=lake*(.014+.052*smoothstep(.50,.92,w));gl_FragColor=vec4(.62,.92,1.0,oceanA+lakeA);}`});
+  const shell=new THREE.Mesh(new THREE.SphereBufferGeometry(earthR+.018,256,128),shellMat);
+  shell.userData.isWaterShell=true; scene.add(shell);
+}
+
+function makeFireFlipbookMaterial(texture, opts={}){
+  return new THREE.ShaderMaterial({
+    transparent:true,
+    depthWrite:false,
+    depthTest:true,
+    blending:THREE.AdditiveBlending,
+    side:THREE.DoubleSide,
+    uniforms:{map:{value:texture},frame:{value:0},rows:{value:8},cols:{value:8},intensity:{value:opts.intensity||1.4},alphaBoost:{value:opts.alphaBoost||1.0},wind:{value:0.0},time:{value:0.0},visibility:{value:0.0}},
+    vertexShader:`
+      varying vec2 vUv;
+      uniform float wind; uniform float time;
+      void main(){
+        vUv=uv;
+        vec3 p=position;
+        float h=smoothstep(0.0,1.0,uv.y);
+        p.x += wind*h*h*0.45;
+        p.x += sin(time*7.0 + uv.y*10.0) * 0.035 * h;
+        gl_Position=projectionMatrix*modelViewMatrix*vec4(p,1.0);
+      }`,
+    fragmentShader:`
+      precision highp float;
+      uniform sampler2D map; uniform float frame; uniform float rows; uniform float cols; uniform float intensity; uniform float alphaBoost; uniform float visibility;
+      varying vec2 vUv;
+      void main(){
+        float f=mod(frame,rows*cols);
+        float col=mod(f,cols);
+        float row=floor(f/cols);
+        vec2 sheetUv=vec2((col+vUv.x)/cols,(rows-1.0-row+vUv.y)/rows);
+        vec4 tex=texture2D(map,sheetUv);
+        float luma=max(max(tex.r,tex.g),tex.b);
+        float a=max(tex.a,smoothstep(0.02,0.20,luma));
+        a*=alphaBoost*visibility;
+        a*=smoothstep(0.0,0.08,vUv.y)*smoothstep(1.0,0.78,vUv.y);
+        if(a<0.01) discard;
+        gl_FragColor=vec4(tex.rgb*intensity,a);
+      }`
+  });
+}
+function addFirePlane(parent,name,w,h,mat,pos,rot,renderOrder){
+  const mesh=new THREE.Mesh(new THREE.PlaneBufferGeometry(w,h,1,16),mat);
+  mesh.name=name; mesh.position.set(pos[0],pos[1],pos[2]); mesh.rotation.set(rot[0],rot[1],rot[2]); mesh.renderOrder=renderOrder; parent.add(mesh); return mesh;
+}
+function makeFireBreath(){
+  if(fireBreath && fireBreath.parent) fireBreath.parent.remove(fireBreath);
+  const loader=new THREE.TextureLoader();
+  const side=loader.load(ASSET.fireSide), iso=loader.load(ASSET.fireIso), topTex=loader.load(ASSET.fireTop);
+  [side,iso,topTex].forEach(t=>{t.encoding=THREE.sRGBEncoding;t.wrapS=t.wrapT=THREE.RepeatWrapping;t.magFilter=THREE.LinearFilter;t.minFilter=THREE.LinearMipMapLinearFilter;t.repeat.set(1/8,1/8);});
+  fireBreath=new THREE.Group(); fireBreath.name='DragonMouth3DFlipbookFire'; fireBreath.visible=false;
+  // The standalone 3D flame grows upward on +Y. It is kept as a scene-level object
+  // and matched every frame to FireBreath.28's world transform. This avoids inheriting
+  // the dragon model's tiny normalization scale, which can make the fire disappear.
+  fireBreath.rotation.copy(FIRE_BONE_LOCAL_ROTATION);
+  fireBreath.position.set(0,0,0);
+  fireBreath.scale.setScalar(FIRE_BONE_SCALE);
+  const sideMatA=makeFireFlipbookMaterial(side,{intensity:1.55,alphaBoost:1.0});
+  const sideMatB=makeFireFlipbookMaterial(side,{intensity:1.28,alphaBoost:0.78});
+  const isoMat=makeFireFlipbookMaterial(iso,{intensity:1.34,alphaBoost:0.82});
+  const topMat=makeFireFlipbookMaterial(topTex,{intensity:1.42,alphaBoost:0.78});
+  fireMats=[sideMatA,sideMatB,isoMat,topMat];
+  addFirePlane(fireBreath,'fire-side-main',1.55,2.65,sideMatA,[0,1.18,0],[0,0,0],220);
+  addFirePlane(fireBreath,'fire-side-cross',1.32,2.45,sideMatB,[0,1.10,0],[0,Math.PI/2,0],221);
+  addFirePlane(fireBreath,'fire-isometric-diagonal',1.68,2.55,isoMat,[0,1.14,0],[0,Math.PI/4,0],222);
+  // Use the top flipbook as a third lengthwise sheet, not as a cross-section.
+  // The previous perpendicular plane created the visible orange disc/ring near the mouth.
+  fireTopPlane=addFirePlane(fireBreath,'fire-top-lengthwise',1.45,2.42,topMat,[0,1.08,0],[0,-Math.PI/4,0],223);
+  const glowMat=new THREE.MeshBasicMaterial({color:0xff6a00,transparent:true,opacity:0.0,blending:THREE.AdditiveBlending,depthWrite:false});
+  fireGlow=new THREE.Mesh(new THREE.CircleBufferGeometry(1.15,48),glowMat); fireGlow.rotation.x=-Math.PI/2; fireGlow.position.y=0.02; fireGlow.renderOrder=219; fireBreath.add(fireGlow);
+  scene.add(fireBreath);
+}
+function findMouthBone(root){
+  // Prefer the animator-authored fire breath bone. This is the true mouth anchor.
+  const exact=root.getObjectByName(FIRE_BONE_NAME);
+  if(exact) return exact;
+  const exactLower=FIRE_BONE_NAME.toLowerCase();
+  let fireCandidate=null;
+  root.traverse(o=>{
+    const n=(o.name||'').toLowerCase();
+    if(!fireCandidate && n===exactLower) fireCandidate=o;
+    if(!fireCandidate && /firebreath|fire_breath|fire breath/.test(n)) fireCandidate=o;
+  });
+  if(fireCandidate) return fireCandidate;
+
+  // Fallback for other dragon models without a fire-breath bone.
+  let candidates=[];
+  root.traverse(o=>{ if(o.isBone){ const n=(o.name||'').toLowerCase(); if(/mouth|jaw|head|neck/.test(n)) candidates.push(o); }});
+  const score=n=>/mouth/.test(n)?4:/jaw/.test(n)?3:/head/.test(n)?2:/neck/.test(n)?1:0;
+  candidates.sort((a,b)=>score((b.name||'').toLowerCase())-score((a.name||'').toLowerCase()));
+  return candidates[0]||null;
+}
+function findNeckBone(root){
+  // Try common neck bone names in priority order
+  const names = ['neck','neck.001','Neck','neck_01','head','Head','spine.006','spine006'];
+  for(const n of names){
+    const b = root.getObjectByName(n);
+    if(b) return b;
+  }
+  // Fallback: find first bone with 'neck' or 'head' in name
+  let found = null;
+  root.traverse(o=>{
+    if(!found && o.isBone){
+      const nm = (o.name||'').toLowerCase();
+      if(/neck|head/.test(nm)) found = o;
+    }
+  });
+  return found;
+}
+
+function updateNeckLook(){
+  if(!neckBone) return;
+  if(camMode !== 'combat'){
+    neckYaw   += (0 - neckYaw)   * 0.08;
+    neckPitch += (0 - neckPitch) * 0.08;
+  }
+  // Mixer already set the animated rotation this frame — add our offset on top
+  neckBone.rotation.order = 'YXZ';
+  neckBone.rotation.y += neckYaw;
+  neckBone.rotation.x += neckPitch;
+}
+
+function updateFireBreath(dt,t){
+  if(!fireBreath) return;
+  const visTarget=(keys.space && playerFire>0)?1.0:0.0;
+  fireActive = fireActive || visTarget>0.0;
+  let anyVisible=false;
+  const fps=26, offsets=[0,13,29,7];
+  for(let i=0;i<fireMats.length;i++){
+    const m=fireMats[i];
+    m.uniforms.frame.value=Math.floor(t*fps+offsets[i])%64;
+    m.uniforms.time.value=t;
+    m.uniforms.wind.value=0.10+0.04*Math.sin(t*2.0);
+    const current=m.uniforms.visibility.value;
+    const next=current+(visTarget-current)*0.36;
+    m.uniforms.visibility.value=next;
+    if(next>0.02) anyVisible=true;
+  }
+  fireBreath.visible=anyVisible;
+  if(fireGlow) fireGlow.material.opacity=(0.10+0.07*Math.sin(t*18.0))*fireMats[0].uniforms.visibility.value;
+  if(mouthBone){
+    mouthBone.updateWorldMatrix(true,false);
+    mouthBone.getWorldPosition(_fireWorldPos);
+    mouthBone.getWorldQuaternion(_fireWorldQuat);
+    _fireLocalOffset.copy(FIRE_BONE_LOCAL_OFFSET).applyQuaternion(_fireWorldQuat);
+    fireBreath.position.copy(_fireWorldPos).add(_fireLocalOffset);
+    fireBreath.quaternion.copy(_fireWorldQuat).multiply(_fireLocalRotQuat);
+    fireBreath.scale.setScalar(FIRE_BONE_SCALE);
+  }
+
+  // ── Player fire cone visual — wraps the actual fire mesh exactly ───────
+  if(playerFireCone){
+    const firing = fireMats.length > 0 && fireMats[0].uniforms.visibility.value > 0.05;
+    playerFireCone.visible = firing;
+    if(firing){
+      // The fire planes extend along fireBreath's own local +Y axis.
+      // Extract that exact world direction instead of recomputing it —
+      // guarantees the cone always wraps the actual fire, including neck rotation.
+      const fireFwd = new THREE.Vector3(0,1,0).applyQuaternion(fireBreath.quaternion).normalize();
+      playerFireCone.position.copy(fireBreath.position);
+      playerFireCone.quaternion.setFromUnitVectors(new THREE.Vector3(0,-1,0), fireFwd);
+      playerFireCone.material.opacity = 0.18 + 0.12*Math.sin(clock.elapsedTime*12);
+      playerFireCone.userData.fireFwd = fireFwd; // cache for damage check
+    }
+  }
+
+  // ── Player fire damages enemy — cone vs enemy capsule spheres ───────────
+  if(anyVisible && enemyRoot){
+    // Same exact origin as the visual fire and cone
+    const mouthPos = fireBreath.position.clone();
+    // Use neck-adjusted fire direction if available
+    const fireFwd = (playerFireCone && playerFireCone.userData.fireFwd)
+      ? playerFireCone.userData.fireFwd
+      : forward;
+    let hit = false;
+    if(enemyCapsuleBones){
+      const eSpheres = getDragonCapsuleSpheres(enemyCapsuleBones, enemyRoot, _enemyCapsuleScratch);
+      for(let i=0;i<eSpheres.length;i++){
+        if(coneHitsSphere(mouthPos, fireFwd, FIRE_CONE_ANGLE, FIRE_CONE_LEN, eSpheres[i].center, eSpheres[i].radius)){ hit=true; break; }
+      }
+    }
+    if(!hit && enemyWingBones){
+      const eWings = getWingCapsuleSpheres(enemyWingBones, _enemyWingScratch);
+      for(let i=0;i<eWings.length;i++){
+        if(coneHitsSphere(mouthPos, fireFwd, FIRE_CONE_ANGLE, FIRE_CONE_LEN, eWings[i].center, eWings[i].radius)){ hit=true; break; }
+      }
+    }
+    if(hit) enemyHP = Math.max(0, enemyHP - 5.0 * dt);
+  }
+}
+
+
+function loadDolphinWaterMasks(){
+  const loadMask=(src,onReady)=>{
+    const img=new Image();
+    img.onload=()=>{
+      const c=document.createElement('canvas'); c.width=img.width; c.height=img.height;
+      const ctx=c.getContext('2d',{willReadFrequently:true}); ctx.drawImage(img,0,0);
+      onReady(c,ctx);
+    };
+    img.src=src;
+  };
+  // Source of truth for dolphin spawning. No land/shore/lake/NASA-colour checks are used anymore.
+  loadMask(ASSET.dolphinSpawnMask,(c,ctx)=>{
+    dolphinSpawnCanvas=c;
+    dolphinSpawnCtx=ctx;
+    createDolphinAllowedDirectionCache(c,ctx);
+    createDolphinSpawnBorderOverlay(c,ctx);
+  });
+}
+function uvToDir(u,v){
+  // CPU mask coordinates use image convention: v=0 is the top/north edge,
+  // v=1 is the bottom/south edge. This matches the hand-painted dolphin map.
+  const lat=(0.5-v)*Math.PI;
+  const y=Math.sin(lat);
+  const h=Math.cos(lat);
+  const a=u*Math.PI*2.0;
+  return new THREE.Vector3(-Math.cos(a)*h,y,Math.sin(a)*h).normalize();
+}
+function hardMaskPixelAllowed(ctx,canvas,x,y){
+  if(!ctx||!canvas) return false;
+  x=((x%canvas.width)+canvas.width)%canvas.width;
+  y=Math.max(0,Math.min(canvas.height-1,y));
+  return ctx.getImageData(x,y,1,1).data[0]/255>DOLPHIN_MASK_THRESHOLD;
+}
+function hardMaskPixelEroded(ctx,canvas,x,y,padPx){
+  if(!hardMaskPixelAllowed(ctx,canvas,x,y)) return false;
+  const checks=[[padPx,0],[-padPx,0],[0,padPx],[0,-padPx],[padPx,padPx],[-padPx,padPx],[padPx,-padPx],[-padPx,-padPx],[padPx*2,0],[-padPx*2,0],[0,padPx*2],[0,-padPx*2]];
+  for(const c of checks){ if(!hardMaskPixelAllowed(ctx,canvas,x+c[0],y+c[1])) return false; }
+  return true;
+}
+function createDolphinAllowedDirectionCache(maskCanvas,maskCtx){
+  dolphinAllowedDirections=[];
+  if(!maskCanvas||!maskCtx) return;
+  // HARD SOURCE OF TRUTH: dolphins can only be spawned from pixels inside dolphin_spawn_mask.png.
+  // This list is precomputed from an eroded version of the exact mask so every candidate is safely
+  // inside the visible B-toggle territory. No legacy ocean/shore/zone logic participates.
+  const stride=6;
+  const padPx=10;
+  for(let y=padPx*2;y<maskCanvas.height-padPx*2;y+=stride){
+    for(let x=0;x<maskCanvas.width;x+=stride){
+      if(!hardMaskPixelEroded(maskCtx,maskCanvas,x,y,padPx)) continue;
+      const u=(x+0.5)/maskCanvas.width;
+      const v=(y+0.5)/maskCanvas.height;
+      dolphinAllowedDirections.push(uvToDir(u,v));
+    }
+  }
+  status('Dolphin mask hard zones ready: '+dolphinAllowedDirections.length+' allowed samples');
+}
+function createDolphinSpawnBorderOverlay(maskCanvas,maskCtx){
+  if(!scene || !maskCanvas || !maskCtx) return;
+
+  // SOURCE OF TRUTH VISUALIZER:
+  // The B-toggle displays the hand-painted dolphin_spawn_mask.png exactly as a texture-mapped
+  // layer on the Earth. No erosion, no remapping, no polygon reconstruction. What you see
+  // here is the canonical dolphin territory. Only the spawn sampler applies a small inset.
+  const tex=new THREE.CanvasTexture(maskCanvas);
+  tex.wrapS=THREE.RepeatWrapping;
+  tex.wrapT=THREE.ClampToEdgeWrapping;
+  tex.minFilter=THREE.LinearFilter;
+  tex.magFilter=THREE.LinearFilter;
+  tex.generateMipmaps=false;
+  tex.needsUpdate=true;
+
+  const mat=new THREE.ShaderMaterial({
+    uniforms:{
+      uMask:{value:tex},
+      uThreshold:{value:DOLPHIN_MASK_THRESHOLD},
+      uEdge:{value:DOLPHIN_MASK_EDGE_DEBUG},
+      uFillAlpha:{value:0.18},
+      uBorderAlpha:{value:0.95}
+    },
+    vertexShader:`
+      varying vec2 vUv;
+      void main(){
+        vUv=uv;
+        gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);
+      }
+    `,
+    fragmentShader:`
+      uniform sampler2D uMask;
+      uniform float uThreshold;
+      uniform float uEdge;
+      uniform float uFillAlpha;
+      uniform float uBorderAlpha;
+      varying vec2 vUv;
+      float m(vec2 uv){return texture2D(uMask,vec2(fract(uv.x),clamp(uv.y,0.0,1.0))).r;}
+      void main(){
+        vec2 uv=vUv;
+        float c=m(uv);
+        if(c<=uThreshold) discard;
+        float outside=0.0;
+        outside=max(outside,1.0-step(uThreshold,m(uv+vec2(uEdge,0.0))));
+        outside=max(outside,1.0-step(uThreshold,m(uv-vec2(uEdge,0.0))));
+        outside=max(outside,1.0-step(uThreshold,m(uv+vec2(0.0,uEdge))));
+        outside=max(outside,1.0-step(uThreshold,m(uv-vec2(0.0,uEdge))));
+        vec3 fill=vec3(0.75,0.02,0.08);
+        vec3 border=vec3(1.0,0.06,0.08);
+        float alpha=mix(uFillAlpha,uBorderAlpha,outside);
+        gl_FragColor=vec4(mix(fill,border,outside),alpha);
+      }
+    `,
+    transparent:true,
+    depthWrite:false,
+    depthTest:true,
+    side:THREE.DoubleSide
+  });
+  dolphinSpawnBorderMesh=new THREE.Mesh(new THREE.SphereGeometry(earthR+0.036,256,128),mat);
+  dolphinSpawnBorderMesh.visible=dolphinSpawnBorderVisible;
+  dolphinSpawnBorderMesh.renderOrder=200;
+  scene.add(dolphinSpawnBorderMesh);
+}
+function toggleDolphinSpawnBorders(){
+  dolphinSpawnBorderVisible=!dolphinSpawnBorderVisible;
+  if(dolphinSpawnBorderMesh) dolphinSpawnBorderMesh.visible=dolphinSpawnBorderVisible;
+  status('Dolphin spawn borders: '+(dolphinSpawnBorderVisible?'ON':'OFF'));
+}
+function dirToUv(d){
+  // HARD ALIGNMENT RULE:
+  // The mask image is an equirectangular atlas with north at the top of the PNG.
+  // Therefore north-pole directions must sample v=0, and south-pole directions v=1.
+  // This is the inverse of uvToDir() above and prevents north/south mirrored spawns.
+  const n=d.clone().normalize();
+  let u=Math.atan2(n.z,-n.x)/(Math.PI*2.0);
+  if(u<0) u+=1.0;
+  const v=0.5-Math.asin(clamp(n.y,-1,1))/Math.PI;
+  return {u:u-Math.floor(u),v:clamp(v,0,1)};
+}
+function sampleMask(ctx,canvas,d){
+  if(!ctx||!canvas) return 0;
+  const uv=dirToUv(d);
+  const x=Math.floor(uv.u*(canvas.width-1));
+  const y=Math.floor(uv.v*(canvas.height-1));
+  return ctx.getImageData(x,y,1,1).data[0]/255;
+}
+function sampleColor(ctx,canvas,d){
+  if(!ctx||!canvas) return null;
+  const uv=dirToUv(d);
+  const x=Math.floor(uv.u*(canvas.width-1));
+  const y=Math.floor(uv.v*(canvas.height-1));
+  const data=ctx.getImageData(x,y,1,1).data;
+  return {r:data[0]/255,g:data[1]/255,b:data[2]/255,a:data[3]/255};
+}
+function maskAllowedRaw(d){
+  return dolphinSpawnCtx ? sampleMask(dolphinSpawnCtx,dolphinSpawnCanvas,d)>DOLPHIN_MASK_THRESHOLD : false;
+}
+function isDolphinSpawnMaskDirection(d){
+  // Eroded-mask check: center plus nearby tangent samples must all be inside the hand-painted zone.
+  // This prevents dolphins/pod members from appearing just outside the visible habitat border.
+  if(!maskAllowedRaw(d)) return false;
+  const n=d.clone().normalize();
+  let a=new THREE.Vector3(0,1,0);
+  if(Math.abs(n.dot(a))>0.92) a.set(1,0,0);
+  const t1=new THREE.Vector3().crossVectors(a,n).normalize();
+  const t2=new THREE.Vector3().crossVectors(n,t1).normalize();
+  const r=DOLPHIN_MASK_INSET;
+  const checks=[
+    n.clone().addScaledVector(t1,r).normalize(),
+    n.clone().addScaledVector(t1,-r).normalize(),
+    n.clone().addScaledVector(t2,r).normalize(),
+    n.clone().addScaledVector(t2,-r).normalize(),
+    n.clone().addScaledVector(t1,r*0.72).addScaledVector(t2,r*0.72).normalize(),
+    n.clone().addScaledVector(t1,-r*0.72).addScaledVector(t2,r*0.72).normalize(),
+    n.clone().addScaledVector(t1,r*0.72).addScaledVector(t2,-r*0.72).normalize(),
+    n.clone().addScaledVector(t1,-r*0.72).addScaledVector(t2,-r*0.72).normalize()
+  ];
+  for(const c of checks){ if(!maskAllowedRaw(c)) return false; }
+  return true;
+}
+function isDolphinSpawnVisible(d,margin=0.16){
+  if(!camera) return true;
+  const pos=d.clone().normalize().multiplyScalar(earthR+DOLPHIN_SURFACE_OFFSET+0.08);
+  const cam=camera.position.clone();
+  const camDist=cam.length();
+  if(camDist>earthR){
+    const horizonCos=earthR/camDist;
+    if(d.clone().normalize().dot(cam.normalize()) < horizonCos-0.035) return false;
+  }
+  const ndc=pos.clone().project(camera);
+  return ndc.z>-1.0 && ndc.z<1.0 && ndc.x>-1.0-margin && ndc.x<1.0+margin && ndc.y>-1.0-margin && ndc.y<1.0+margin;
+}
+function dolphinMasksReady(){
+  return !!(dolphinSpawnCtx&&dolphinSpawnCanvas);
+}
+function isOceanDirection(d){
+  return isDolphinSpawnMaskDirection(d);
+}
+function isLakeDirection(d){
+  return false;
+}
+function shoreDistanceValue(d){
+  return 1.0;
+}
+function isInDolphinHabitat(d){
+  return isDolphinSpawnMaskDirection(d);
+}
+function basicDolphinOceanDirection(d){
+  return isDolphinSpawnMaskDirection(d);
+}
+function isOpenOceanDirection(d){
+  return isDolphinSpawnMaskDirection(d);
+}
+function isOpenOceanJumpPath(start,travel){
+  // Validate the full short jump path against the eroded hand-painted mask.
+  for(let p=0;p<=1.001;p+=0.125){
+    const d=start.clone().addScaledVector(travel,DOLPHIN_SURFACE_TRAVEL*p).normalize();
+    if(!isDolphinSpawnMaskDirection(d)) return false;
+  }
+  return true;
+}
+function makeSplashTexture(){
+  // Fallback texture if external splash assets are unavailable.
+  const c=document.createElement('canvas'); c.width=128; c.height=128;
+  const ctx=c.getContext('2d'); ctx.clearRect(0,0,128,128);
+  ctx.strokeStyle='rgba(215,245,255,0.92)'; ctx.lineWidth=5; ctx.lineCap='round';
+  const strokes=[
+    [64,96,58,54],[64,96,70,50],[58,98,36,72],[70,98,94,70],[54,100,20,92],[74,100,110,90],
+    [64,98,64,38],[50,102,42,58],[78,102,88,58]
+  ];
+  for(const st of strokes){ctx.beginPath(); ctx.moveTo(st[0],st[1]); ctx.quadraticCurveTo((st[0]+st[2])/2,Math.min(st[1],st[3])-14,st[2],st[3]); ctx.stroke();}
+  ctx.fillStyle='rgba(230,250,255,0.9)';
+  [[38,66,4],[91,62,4],[26,88,3],[106,84,3],[61,36,3],[78,45,3],[51,52,2.5]].forEach(d=>{ctx.beginPath();ctx.arc(d[0],d[1],d[2],0,Math.PI*2);ctx.fill();});
+  const tex=new THREE.CanvasTexture(c); tex.needsUpdate=true; return tex;
+}
+function loadDolphinWaterVfxTextures(){
+  const tl=new THREE.TextureLoader();
+  const prep=tex=>{tex.wrapS=tex.wrapT=THREE.ClampToEdgeWrapping; tex.minFilter=THREE.LinearMipMapLinearFilter; tex.magFilter=THREE.LinearFilter; tex.needsUpdate=true; return tex;};
+  dolphinFoamTexture=prep(tl.load(ASSET.foamSplash));
+  dolphinRippleTexture=prep(tl.load(ASSET.rippleHeight));
+  dolphinDropletTexture=prep(tl.load(ASSET.splashDroplets));
+  dolphinWakeTexture=prep(tl.load(ASSET.wakeTrail));
+}
+const dolphinFallbackSplashTexture=makeSplashTexture();
+function makeSplash(){
+  const group=new THREE.Group(); group.visible=false; group.renderOrder=118;
+  const foamTex=dolphinFoamTexture||dolphinFallbackSplashTexture;
+  const rippleTex=dolphinRippleTexture||dolphinFallbackSplashTexture;
+  const dropletTex=dolphinDropletTexture||dolphinFallbackSplashTexture;
+  const wakeTex=dolphinWakeTexture||dolphinFallbackSplashTexture;
+
+  // Water-surface expanding ripple / foam disc.
+  const rippleG=new THREE.PlaneBufferGeometry(0.34,0.34);
+  const rippleM=new THREE.MeshBasicMaterial({map:rippleTex,color:0xcff6ff,transparent:true,opacity:0.0,side:THREE.DoubleSide,depthWrite:false,blending:THREE.AdditiveBlending});
+  const ripple=new THREE.Mesh(rippleG,rippleM); ripple.renderOrder=118; ripple.position.z=0.002; group.add(ripple);
+
+  // Brighter foam burst at the impact point.
+  const foamG=new THREE.PlaneBufferGeometry(0.24,0.24);
+  const foamM=new THREE.MeshBasicMaterial({map:foamTex,color:0xffffff,transparent:true,opacity:0.0,side:THREE.DoubleSide,depthWrite:false,blending:THREE.AdditiveBlending});
+  const foam=new THREE.Mesh(foamG,foamM); foam.renderOrder=119; foam.position.z=0.006; group.add(foam);
+
+  // Vertical splash plume / droplets billboard.
+  const plumeG=new THREE.PlaneBufferGeometry(0.30,0.38);
+  const plumeM=new THREE.MeshBasicMaterial({map:dropletTex,color:0xffffff,transparent:true,opacity:0.0,side:THREE.DoubleSide,depthWrite:false,blending:THREE.AdditiveBlending});
+  const plume=new THREE.Mesh(plumeG,plumeM); plume.renderOrder=120; plume.position.z=0.13; plume.rotation.x=Math.PI/2; group.add(plume);
+
+  // Short wake streak that points along the dolphin travel direction.
+  const wakeG=new THREE.PlaneBufferGeometry(0.18,0.42);
+  const wakeM=new THREE.MeshBasicMaterial({map:wakeTex,color:0xdff9ff,transparent:true,opacity:0.0,side:THREE.DoubleSide,depthWrite:false,blending:THREE.AdditiveBlending});
+  const wake=new THREE.Mesh(wakeG,wakeM); wake.renderOrder=117; wake.position.y=-0.18; wake.position.z=0.004; group.add(wake);
+
+  group.userData={ripple,foam,plume,wake,age:0,duration:1.05,size:1};
+  scene.add(group); return group;
+}
+function makeDolphinWake(){
+  const group=new THREE.Group(); group.visible=false; group.renderOrder=116;
+  const wakeTex=dolphinWakeTexture||dolphinFallbackSplashTexture;
+  const wakeG=new THREE.PlaneBufferGeometry(0.18,0.46);
+  const wakeM=new THREE.MeshBasicMaterial({map:wakeTex,color:0xdff9ff,transparent:true,opacity:0.0,side:THREE.DoubleSide,depthWrite:false,blending:THREE.AdditiveBlending});
+  const wake=new THREE.Mesh(wakeG,wakeM); wake.renderOrder=116; group.add(wake);
+  group.userData={wake,age:0,duration:DOLPHIN_WAKE_DURATION,size:1}; scene.add(group); return group;
+}
+function orientVerticalBillboardOnWater(mesh,dir,fwd){
+  const up=dir.clone().normalize();
+  const forwardT=fwd.clone().addScaledVector(up,-fwd.dot(up));
+  if(forwardT.lengthSq()<0.0001) forwardT.crossVectors(up,new THREE.Vector3(0,1,0));
+  forwardT.normalize();
+  const side=new THREE.Vector3().crossVectors(up,forwardT).normalize();
+  const m=new THREE.Matrix4().makeBasis(side,up,forwardT);
+  mesh.quaternion.setFromRotationMatrix(m);
+}
+function orientOnSphere(obj,dir,fwd){
+  const up=dir.clone().normalize();
+  const forwardT=fwd.clone().addScaledVector(up,-fwd.dot(up));
+  if(forwardT.lengthSq()<0.0001) forwardT.crossVectors(up,new THREE.Vector3(0,1,0));
+  forwardT.normalize();
+  // Level dolphin against the local ocean tangent plane.
+  // X = right, Y = local globe normal/up, Z = travel direction.
+  // Using up x forward avoids the sideways/rolled look from a left-handed basis.
+  const side=new THREE.Vector3().crossVectors(up,forwardT).normalize();
+  const correctedForward=new THREE.Vector3().crossVectors(side,up).normalize();
+  const m=new THREE.Matrix4().makeBasis(side,up,correctedForward);
+  obj.quaternion.setFromRotationMatrix(m);
+}
+function orientSplashOnWater(obj,dir,fwd){
+  const up=dir.clone().normalize();
+  const forwardT=fwd.clone().addScaledVector(up,-fwd.dot(up));
+  if(forwardT.lengthSq()<0.0001) forwardT.crossVectors(up,new THREE.Vector3(0,1,0));
+  forwardT.normalize();
+  const side=new THREE.Vector3().crossVectors(forwardT,up).normalize();
+  const m=new THREE.Matrix4().makeBasis(side,forwardT,up);
+  obj.quaternion.setFromRotationMatrix(m);
+}
+
+function sanitizeDolphinJumpClip(clip){
+  // The dolphin's Jump animation has useful vertical leap motion, but also has baked root
+  // travel along the model's forward axis. That root-motion makes the dolphin slide/back up
+  // on the globe. Keep the Y/up keys and freeze the horizontal root keys at frame 0.
+  if(!clip) return clip;
+  const clean=clip.clone();
+  clean.tracks=clean.tracks.map(track=>{
+    if(/Dolphin_Root\.position$/i.test(track.name) || /Dolphin_Root\.translation$/i.test(track.name)){
+      const t=track.clone();
+      const v=t.values;
+      if(v && v.length>=3){
+        const baseX=v[0], baseZ=v[2];
+        for(let i=0;i<v.length;i+=3){
+          v[i]=baseX;       // no sideways drift
+          // v[i+1] is retained: this is the animated jump height/emergence
+          v[i+2]=baseZ;     // no forward/backward root-motion slide
+        }
+      }
+      return t;
+    }
+    return track;
+  });
+  clean.resetDuration();
+  return clean;
+}
+
+function createDolphinInstance(){
+  if(!dolphinTemplate) return null;
+  const root=new THREE.Group(); root.visible=false; root.userData.active=false;
+  const model=(THREE.SkeletonUtils&&THREE.SkeletonUtils.clone)?THREE.SkeletonUtils.clone(dolphinTemplate):dolphinTemplate.clone(true);
+  model.scale.setScalar(DOLPHIN_SCALE);
+  model.rotation.y=Math.PI;
+  model.traverse(o=>{if(o.isMesh){o.frustumCulled=false;o.castShadow=false;o.receiveShadow=false; const mats=Array.isArray(o.material)?o.material:[o.material]; mats.forEach(m=>{if(m){if('roughness' in m)m.roughness=.45; m.needsUpdate=true;}});}});
+  root.add(model); scene.add(root);
+  const mixer=new THREE.AnimationMixer(model);
+  let action=null;
+  if(dolphinJumpClip){action=mixer.clipAction(dolphinJumpClip); action.setLoop(THREE.LoopRepeat,Infinity); action.play();}
+  return {root,model,mixer,action,splashA:makeSplash(),splashB:makeSplash(),wake:makeDolphinWake(),age:0,delay:0,started:false,duration:DOLPHIN_JUMP_DURATION,startDir:new THREE.Vector3(),travelDir:new THREE.Vector3(),phase:Math.random()*10,arcScale:1,skimScale:1,travelScale:1,podId:0};
+}
+function loadDolphins(){
+  loadDolphinWaterVfxTextures();
+  loadDolphinWaterMasks();
+  status('Loading dolphin ambient wildlife...');
+  new THREE.GLTFLoader().load(ASSET.dolphin,gltf=>{
+    dolphinTemplate=gltf.scene;
+    dolphinTemplate.traverse(o=>{if(o.isMesh){o.frustumCulled=false;}});
+    dolphinJumpClip=sanitizeDolphinJumpClip((gltf.animations||[]).find(c=>/^jump$/i.test(c.name))||(gltf.animations||[]).find(c=>/jump/i.test(c.name))||(gltf.animations||[])[0]);
+    dolphinSwimClip=(gltf.animations||[]).find(c=>/swimforward/i.test(c.name));
+    for(let i=0;i<DOLPHIN_MAX_ACTIVE;i++){const d=createDolphinInstance(); if(d)dolphins.push(d);}
+    status('Dolphins ready: '+(dolphinJumpClip?dolphinJumpClip.name:'no jump clip'));
+  },undefined,e=>status('Dolphin load failed: '+(e.message||'')));
+}
+function randomOceanNearDragon(){
+  // HARD RULE: choose ONLY from the precomputed dolphin_spawn_mask samples, and ONLY
+  // from samples currently visible to the camera. This is the only dolphin spawning path.
+  if(!dolphinAllowedDirections.length) return null;
+  const visible=[];
+  for(let i=0;i<dolphinAllowedDirections.length;i++){
+    const d=dolphinAllowedDirections[i];
+    if(isDolphinSpawnVisible(d,0.08) && isDolphinSpawnMaskDirection(d)) visible.push(d);
+  }
+  if(!visible.length) return null;
+  // Try a few random visible samples, preferring points somewhat near the dragon view direction
+  // but never falling back outside the mask.
+  for(let tries=0;tries<80;tries++){
+    const d=visible[Math.floor(Math.random()*visible.length)].clone();
+    if(isDolphinSpawnMaskDirection(d)) return {dir:d};
+  }
+  return null;
+}
+function dolphinDirectionAt(d,p){
+  // Controlled small arc across the local ocean tangent plane.
+  // The dolphin GLB's visible forward axis is opposite the world travel basis after model correction,
+  // so the procedural arc must move along -travelDir. Otherwise the dolphin appears to jump backward.
+  const pc=clamp(p,0,1);
+  const travelProgress=pc; // start -> splashdown
+  const curved=d.startDir.clone().addScaledVector(d.travelDir,DOLPHIN_SURFACE_TRAVEL*(d.travelScale||1.0)*travelProgress).normalize();
+  return curved;
+}
+function dolphinWaterPosition(dir){
+  return dir.clone().multiplyScalar(earthR+DOLPHIN_SURFACE_OFFSET);
+}
+function dolphinSubmergedPosition(dir){
+  // Anchor the whole dolphin below the water/globe at idle/start/end, so it fully disappears.
+  return dir.clone().multiplyScalar(earthR-DOLPHIN_SUBMERGE_DEPTH);
+}
+function dolphinJumpRootPosition(d,dir,p){
+  // Keep start/end fully submerged, but skim close enough during the jump for dorsal fins to cut the water.
+  // The GLB Jump clip provides body motion; this adds a subtle readable arc in world space.
+  const pc=clamp(p,0,1);
+  const sinp=Math.sin(Math.PI*pc);
+  const skim=Math.pow(sinp,0.62);
+  // Sharper, less-flat dolphin leap: a stronger parabolic peak with minimal horizontal travel.
+  const arc=Math.pow(sinp,1.15);
+  // Start/end fully underwater; mid-jump rises clearly above the surface.
+  const r=earthR-DOLPHIN_SUBMERGE_DEPTH + DOLPHIN_SURFACE_SKIM_LIFT*(d.skimScale||1.0)*skim + DOLPHIN_EXTRA_ARC_LIFT*(d.arcScale||1.0)*arc;
+  return dir.clone().multiplyScalar(r);
+}
+function hideDolphinCompletely(d){
+  if(!d) return;
+  d.root.userData.active=false;
+  d.root.visible=false;
+  d.started=false;
+  d.age=0;
+  d.delay=0;
+  d.podId=0;
+  if(d.wake)d.wake.visible=false;
+  if(d.splashA)d.splashA.visible=false;
+  if(d.splashB)d.splashB.visible=false;
+}
+function dolphinEntireVisibleObjectInsideMask(d,dir){
+  // The visible model can extend beyond its root due to animation, model scale, and pod offsets.
+  // Enforce the same mask at several nearby surface samples around the dolphin footprint.
+  if(!isDolphinSpawnMaskDirection(dir)) return false;
+  const up=dir.clone().normalize();
+  const f=d.travelDir.clone().addScaledVector(up,-d.travelDir.dot(up));
+  if(f.lengthSq()<0.0001) f.crossVectors(up,new THREE.Vector3(0,1,0));
+  f.normalize();
+  const r=new THREE.Vector3().crossVectors(f,up).normalize();
+  const footprint=0.010; // safely larger than dolphin visual footprint + splash/wake center drift
+  const checks=[
+    dir,
+    up.clone().addScaledVector(f,footprint).normalize(),
+    up.clone().addScaledVector(f,-footprint).normalize(),
+    up.clone().addScaledVector(r,footprint).normalize(),
+    up.clone().addScaledVector(r,-footprint).normalize()
+  ];
+  for(const c of checks){ if(!isDolphinSpawnMaskDirection(c)) return false; }
+  return true;
+}
+function activateDolphinInPod(d,start,travel,delay,podId){
+  d.age=0;
+  d.delay=delay||0;
+  d.started=false;
+  d.duration=(dolphinJumpClip?dolphinJumpClip.duration:DOLPHIN_JUMP_DURATION)*(0.94+Math.random()*0.12);
+  d.arcScale=0.90+Math.random()*0.18;
+  d.skimScale=0.94+Math.random()*0.12;
+  d.travelScale=0.88+Math.random()*0.18;
+  d.phase=Math.random()*10;
+  d.podId=podId||0;
+  d.startDir.copy(start); d.travelDir.copy(travel); d.root.userData.active=true; d.root.visible=false;
+  d.root.position.copy(dolphinSubmergedPosition(start));
+  orientOnSphere(d.root,start,travel);
+  if(d.action){d.action.reset(); d.action.stop(); d.action.timeScale=0.88+Math.random()*0.24;}
+  d.splashA.visible=false; d.splashB.visible=false; if(d.wake)d.wake.visible=false;
+}
+function beginDolphinJump(d){
+  d.started=true; d.age=0; d.root.visible=true;
+  if(d.action){d.action.reset().play();}
+  triggerSplash(d.splashA,d.startDir,d.travelDir,1.0);
+}
+function activeDolphinPodCount(){
+  const ids=new Set();
+  for(const d of dolphins){
+    if(d.root.userData.active && d.podId) ids.add(d.podId);
+  }
+  return ids.size;
+}
+function spawnDolphinPod(){
+  if(activeDolphinPodCount()>=DOLPHIN_MAX_ACTIVE_PODS) return;
+  const podSize=DOLPHIN_POD_MIN+Math.floor(Math.random()*(DOLPHIN_POD_MAX-DOLPHIN_POD_MIN+1));
+  const free=dolphins.filter(x=>!x.root.userData.active).slice(0,podSize);
+  if(free.length<podSize || !dolphinMasksReady()) return;
+  const pick=randomOceanNearDragon();
+  if(!pick) return;
+  const podId=dolphinNextPodId++;
+  const base=pick.dir;
+  const localF=forward.clone().addScaledVector(base,-forward.dot(base));
+  if(localF.lengthSq()<0.001) localF.crossVectors(base,right);
+  localF.normalize();
+  const localR=new THREE.Vector3().crossVectors(localF,base).normalize();
+  const angle=(Math.random()-.5)*1.0;
+  const travel=localF.clone().multiplyScalar(Math.cos(angle)).add(localR.clone().multiplyScalar(Math.sin(angle))).normalize();
+  const spacing=0.012;
+  for(let i=0;i<podSize;i++){
+    // Each dolphin in the pod jumps independently, not in lockstep.
+    // Random 0-2s separation keeps groups natural while still reading as one pod.
+    const stagger=Math.random()*2.0;
+    const side=(i-(podSize-1)*0.5)*spacing + (Math.random()-.5)*0.006;
+    const ahead=(Math.random()-.5)*0.012;
+    const start=base.clone().addScaledVector(localR,side).addScaledVector(localF,ahead).normalize();
+    if(!isDolphinSpawnVisible(start,0.18)) continue;
+    if(!isDolphinSpawnMaskDirection(start)) continue;
+    if(!isOpenOceanJumpPath(start,travel)) continue;
+    const tempD={travelDir:travel};
+    if(!dolphinEntireVisibleObjectInsideMask(tempD,start)) continue;
+    const splashdown=start.clone().addScaledVector(travel,DOLPHIN_SURFACE_TRAVEL*(0.88+Math.random()*0.18)).normalize();
+    if(!isDolphinSpawnMaskDirection(splashdown)) continue;
+    if(!dolphinEntireVisibleObjectInsideMask(tempD,splashdown)) continue;
+    activateDolphinInPod(free[i],start,travel,stagger,podId);
+  }
+}
+function triggerSplash(splash,dir,fwd,size){
+  if(!splash) return;
+  splash.visible=true; splash.userData.age=0; splash.userData.size=size||1;
+  splash.position.copy(dolphinWaterPosition(dir)); orientSplashOnWater(splash,dir,fwd);
+  if(splash.userData.ripple){splash.userData.ripple.material.opacity=.48; splash.userData.ripple.scale.setScalar(0.62*(size||1));}
+  if(splash.userData.foam){splash.userData.foam.material.opacity=.82; splash.userData.foam.scale.setScalar(0.78*(size||1)); splash.userData.foam.rotation.z=Math.random()*Math.PI*2;}
+  if(splash.userData.plume){splash.userData.plume.material.opacity=.86; splash.userData.plume.scale.setScalar(0.78*(size||1)); splash.userData.plume.rotation.x=Math.PI/2; splash.userData.plume.rotation.z=0;}
+  if(splash.userData.wake){splash.userData.wake.material.opacity=.44; splash.userData.wake.scale.set(0.9*(size||1),1.05*(size||1),1);}
+}
+function updateSplash(splash,dt){
+  if(!splash||!splash.visible) return;
+  splash.userData.age=(splash.userData.age||0)+dt;
+  const p=clamp(splash.userData.age/(splash.userData.duration||1.05),0,1);
+  const size=splash.userData.size||1;
+  if(splash.userData.ripple){
+    splash.userData.ripple.scale.setScalar((0.62+p*2.4)*size);
+    splash.userData.ripple.material.opacity=Math.max(0,.48*(1-p));
+  }
+  if(splash.userData.foam){
+    splash.userData.foam.scale.setScalar((0.78+p*1.15)*size);
+    splash.userData.foam.material.opacity=Math.max(0,.82*(1-p));
+  }
+  if(splash.userData.plume){
+    splash.userData.plume.scale.setScalar((0.78+p*1.05)*size);
+    splash.userData.plume.position.z=0.13+p*0.17;
+    splash.userData.plume.material.opacity=Math.max(0,.86*(1-p));
+  }
+  if(splash.userData.wake){
+    splash.userData.wake.scale.set(0.9*(1+p*1.4)*size,1.05*(1+p*1.1)*size,1);
+    splash.userData.wake.material.opacity=Math.max(0,.44*(1-p));
+  }
+  if(p>=1) splash.visible=false;
+}
+function updateDolphinWake(wake,dir,fwd,dt,visibleStrength){
+  if(!wake) return;
+  const strength=clamp(visibleStrength||0,0,1);
+  if(strength<=0.01){wake.visible=false; return;}
+  wake.visible=true;
+  wake.userData.age=(wake.userData.age||0)+dt;
+  wake.position.copy(dolphinWaterPosition(dir));
+  orientSplashOnWater(wake,dir,fwd);
+  if(wake.userData.wake){
+    const pulse=0.88+0.12*Math.sin(wake.userData.age*8.0);
+    wake.userData.wake.material.opacity=0.34*strength;
+    wake.userData.wake.scale.set(0.85*pulse,1.45*pulse,1);
+  }
+}
+function updateDolphins(dt,t){
+  dolphinSpawnTimer-=dt;
+  if(dolphinSpawnTimer<=0 && dolphins.length){spawnDolphinPod(); dolphinSpawnTimer=DOLPHIN_MIN_SPAWN_DELAY+Math.random()*(DOLPHIN_MAX_SPAWN_DELAY-DOLPHIN_MIN_SPAWN_DELAY);}
+  for(const d of dolphins){
+    if(d.mixer)d.mixer.update(dt);
+    updateSplash(d.splashA,dt); updateSplash(d.splashB,dt);
+    if(!d.root.userData.active){ d.podId=0; if(d.wake)d.wake.visible=false; continue; }
+    if(!d.started){
+      d.delay-=dt;
+      if(d.delay<=0) beginDolphinJump(d);
+      else continue;
+    }
+    d.age+=dt; const p=clamp(d.age/d.duration,0,1);
+    const curDir=dolphinDirectionAt(d,p);
+    // Runtime hard safety: if any part of the dolphin footprint crosses outside
+    // the hand-painted territory mask, remove it immediately. No legacy/fallback path.
+    if(!dolphinEntireVisibleObjectInsideMask(d,curDir)){
+      hideDolphinCompletely(d);
+      continue;
+    }
+    d.root.position.copy(dolphinJumpRootPosition(d,curDir,p));
+    const surfaceWake=Math.pow(Math.sin(Math.PI*p),0.35);
+    updateDolphinWake(d.wake,curDir,d.travelDir,dt,surfaceWake);
+    orientOnSphere(d.root,curDir,d.travelDir);
+    // Nose pose follows the arc: slight nose-up on takeoff, clear head-down tilt on descent.
+    // Rotation is around the local side axis only, so it does not add roll/slant.
+    let pitchArc=0.0;
+    if(p<0.50){
+      pitchArc=0.24*(1.0-p/0.50);
+    }else{
+      const dp=clamp((p-0.50)/0.45,0,1);
+      pitchArc=-0.82*Math.sin(dp*Math.PI*0.5);
+      if(p>0.93) pitchArc*=1.0-clamp((p-0.93)/0.07,0,1)*0.35;
+    }
+    d.root.rotateX(pitchArc);
+    // Keep pods level: avoid procedural roll that made dolphins look slanted from above.
+    if(p>.82 && !d.splashB.visible){
+      const endDir=dolphinDirectionAt(d,1.0);
+      triggerSplash(d.splashB,endDir,d.travelDir,1.15);
+    }
+    if(p>=1){hideDolphinCompletely(d);}
+  }
+}
+
+function makeDragonFallback(){
+  dragonRoot=new THREE.Group(); scene.add(dragonRoot);
+  const mat=new THREE.MeshStandardMaterial({color:0x7a3118,roughness:.72});
+  const body=new THREE.Mesh(new THREE.ConeBufferGeometry(.10,.85,12),mat); body.rotation.x=Math.PI/2; body.castShadow=true; dragonRoot.add(body);
+  const wingMat=new THREE.MeshStandardMaterial({color:0x2c120c,roughness:.85,side:THREE.DoubleSide});
+  const wg=new THREE.BufferGeometry(); wg.setAttribute('position',new THREE.BufferAttribute(new Float32Array([0,0,0,-.55,0,.18,-.20,0,-.22,0,0,0,.55,0,.18,.20,0,-.22]),3)); wg.setIndex([0,1,2,3,4,5]); wg.computeVertexNormals(); const fallbackWings=new THREE.Mesh(wg,wingMat); fallbackWings.castShadow=true; dragonRoot.add(fallbackWings);
+}
+function loadDragon(){
+  status('Loading Dragon.glb...');
+  new THREE.GLTFLoader().load(ASSET.dragon,gltf=>{
+    // Universal mesh setup, done ONCE on the raw loaded scene before anyone clones
+    // it. This used to run again, redundantly, inside initEnemyDragon's own
+    // separate GLTFLoader callback — both player and enemy fetched and decoded
+    // the same 33MB file independently. Now the file is fetched/decoded exactly
+    // once; the enemy gets an independent SkeletonUtils.clone() of this template
+    // instead (own skeleton, own bones, own cloned materials — safe to tint red
+    // without affecting the player's copy).
+    const template=gltf.scene;
+    const box=new THREE.Box3().setFromObject(template), size=new THREE.Vector3(), ctr=new THREE.Vector3(); box.getSize(size); box.getCenter(ctr); template.position.sub(ctr);
+    const maxDim=Math.max(size.x,size.y,size.z)||1; template.scale.setScalar(0.78/maxDim);
+    template.traverse(o=>{
+      if(o.isMesh){
+        o.frustumCulled=false;
+        o.castShadow=true;
+        o.receiveShadow=false;
+        const mats=Array.isArray(o.material)?o.material:[o.material];
+        mats.forEach(m=>{
+          if(!m) return;
+          m.side=THREE.DoubleSide;
+          if('roughness' in m) m.roughness=.74;
+          // Critical for animated shadows: older Three.js needs the depth material to know
+          // the mesh is skinned, otherwise the shadow can render from a static bind pose.
+          if(o.isSkinnedMesh) m.skinning=true;
+          m.needsUpdate=true;
+        });
+        if(o.isSkinnedMesh){
+          o.customDepthMaterial=new THREE.MeshDepthMaterial({depthPacking:THREE.RGBADepthPacking});
+          o.customDepthMaterial.skinning=true;
+          o.customDepthMaterial.side=THREE.DoubleSide;
+        }
+      }
+    });
+    dragonTemplate=template;
+    dragonTemplateAnimations=gltf.animations||[];
+
+    // Player gets its own clone, same as the enemy will — keeps both instances
+    // fully independent (own skeleton/bones/materials) even though only one fetch
+    // and one round of universal setup happened above.
+    dragonRoot.clear();
+    dragonVisual=(THREE.SkeletonUtils&&THREE.SkeletonUtils.clone)?THREE.SkeletonUtils.clone(dragonTemplate):dragonTemplate.clone(true);
+    dragonRoot.add(dragonVisual);
+    mouthBone=findMouthBone(dragonVisual);
+    makeFireBreath();
+    status('Mouth fire anchor: '+(mouthBone?mouthBone.name:'fallback local offset'));
+    neckBone = findNeckBone(dragonVisual);
+    status(neckBone ? ('Neck bone found: '+neckBone.name) : 'No neck bone found — mouse-look disabled');
+    playerWingBones = findWingBones(dragonVisual);
+    const playerWingsFound = playerWingBones.filter(w=>w.boneRef).length;
+    status('Wing hit-spheres: '+playerWingsFound+'/'+WING_CAPSULE.length+' bones found');
+    playerCapsuleBones = findCapsuleBones(dragonVisual);
+    const playerCapsuleFound = playerCapsuleBones.filter(s=>s.boneRef).length;
+    status('Capsule hit-spheres: '+playerCapsuleFound+'/'+DRAGON_CAPSULE.length+' bones found');
+    if(!neckBone){
+      // Debug: list all bone names containing common keywords so we can identify the right one
+      const allBoneNames = [];
+      dragonVisual.traverse(o=>{ if(o.isBone) allBoneNames.push(o.name); });
+      console.log('All bone names ('+allBoneNames.length+'):', allBoneNames);
+      status('Bone names logged to console — press F12 to inspect');
+    }
+    if(gltf.animations&&gltf.animations.length){mixer=new THREE.AnimationMixer(dragonVisual); const fly=gltf.animations.find(c=>/fly/i.test(c.name))||gltf.animations[0]; flyAction=mixer.clipAction(fly); flyAction.play(); status('Dragon loaded: '+fly.name);} else status('Dragon loaded: no animation clips found.');
+    // Template is ready — run any callbacks that were waiting on it (the enemy
+    // dragon, if initEnemyDragon() already ran its synchronous setup and reached
+    // its onDragonTemplateReady call before this finished).
+    while(dragonTemplateCallbacks.length) dragonTemplateCallbacks.shift()(dragonTemplate, dragonTemplateAnimations);
+  },undefined,e=>{
+    status('Dragon load failed. Use local server: python -m http.server. '+(e.message||''));
+    // Enemy depends on this same load via onDragonTemplateReady — if it failed,
+    // let any waiting callbacks know rather than leaving them hanging silently
+    // with no feedback at all.
+    if(dragonTemplateCallbacks.length){
+      status('Enemy dragon also failed to load (shares the same dragon.glb fetch).');
+      dragonTemplateCallbacks.length=0;
+    }
+  });
+}
+function makeShadow(){
+  // Real dynamic shadow: the animated dragon mesh casts onto a transparent tangent receiver
+  // that hugs the Earth directly below the dragon. This uses Three.js shadow maps, so
+  // wing flaps from the GLB animation appear in the shadow instead of a fake still decal.
+  shadowTarget=new THREE.Object3D(); scene.add(shadowTarget);
+  shadowLight=new THREE.DirectionalLight(0xffffff,0.001); // tiny intensity; real shadow comes from ShadowMaterial receiver
+  shadowLight.castShadow=true;
+  shadowLight.target=shadowTarget;
+  shadowLight.shadow.mapSize.set(2048,2048);
+  shadowLight.shadow.camera.near=0.01;
+  shadowLight.shadow.camera.far=8.0;
+  shadowLight.shadow.camera.left=-2.2;
+  shadowLight.shadow.camera.right=2.2;
+  shadowLight.shadow.camera.top=2.2;
+  shadowLight.shadow.camera.bottom=-2.2;
+  shadowLight.shadow.bias=-0.00008;
+  shadowLight.shadow.normalBias=0.006;
+  shadowLight.shadow.autoUpdate=true;
+  scene.add(shadowLight);
+
+  const shMat=new THREE.ShadowMaterial({color:0x000000,opacity:0.22,transparent:true,depthWrite:false});
+  shadowPlane=new THREE.Mesh(new THREE.CircleBufferGeometry(2.25,72),shMat);
+  shadowPlane.receiveShadow=true;
+  shadowPlane.castShadow=false;
+  shadowPlane.renderOrder=90;
+  scene.add(shadowPlane);
+}
+function updateShadow(t){
+  if(!shadowPlane||!shadowLight||!shadowTarget) return;
+  // Surface point directly below dragon; slight offset prevents z-fighting with the globe.
+  const surface=radial.clone().multiplyScalar(earthR+0.145);
+  const basis=new THREE.Matrix4().makeBasis(right.clone(),forward.clone(),radial.clone());
+  shadowPlane.position.copy(surface);
+  shadowPlane.quaternion.setFromRotationMatrix(basis);
+
+  // Size/softness change with altitude, aircraft-style.
+  const size=clamp(1.05+altitude*.26,0.95,2.35);
+  shadowPlane.scale.setScalar(size);
+  shadowPlane.material.opacity=clamp(0.30-altitude*.045,0.075,0.24);
+
+  // Put a shadow-only directional light above the dragon along the local radial vector.
+  // This projects the dragon silhouette almost directly below it, which reads better
+  // for a flight game than a far-side sun-cast shadow on a curved planet.
+  shadowTarget.position.copy(surface);
+  shadowLight.position.copy(dragonRoot.position).add(radial.clone().multiplyScalar(3.2));
+  shadowLight.target.updateMatrixWorld(true);
+  shadowLight.updateMatrixWorld(true);
+
+  // Keep the shadow camera centered around the dragon/surface area.
+  const d=clamp(1.7+altitude*.45,1.6,4.2);
+  shadowLight.shadow.camera.left=-d;
+  shadowLight.shadow.camera.right=d;
+  shadowLight.shadow.camera.top=d;
+  shadowLight.shadow.camera.bottom=-d;
+  shadowLight.shadow.camera.updateProjectionMatrix();
+  shadowLight.shadow.camera.updateMatrixWorld(true);
+  shadowLight.shadow.needsUpdate=true;
+}
+function resetFlight(){radial.set(.20,.55,.81).normalize();forward.set(0,0,1);projectForward();altitude=.76;speed=targetSpeed=.032;camYaw=0;camPitch=Math.PI/2;camDist=3.80;camMode='top';}
+function projectForward(){forward.addScaledVector(radial,-forward.dot(radial)).normalize();right.crossVectors(forward,radial).normalize();}
+function updateFlight(dt){
+  // Up now works like thrust/forward flight: hold ↑ to actively move forward and speed up.
+  // Without ↑ the dragon keeps only a very light glide so camera/orientation remain stable.
+  if(keys.up){targetSpeed+=dt*.115;flyAnimSpeed+=dt*1.15}else targetSpeed-=dt*.035;
+  if(keys.down){targetSpeed-=dt*.11;flyAnimSpeed-=dt*.95} targetSpeed=clamp(targetSpeed,keys.up?.030:.004,maxSpeed); flyAnimSpeed=clamp(flyAnimSpeed,.35,3.1); speed+=(targetSpeed-speed)*(1-Math.exp(-dt*4.2));
+  if(keys.w)altitude+=dt*.75; if(keys.s)altitude-=dt*.75; altitude=clamp(altitude,minAlt,maxAlt);
+  let turn=0;if(keys.left)turn+=1;if(keys.right)turn-=1;if(turn){forward.applyAxisAngle(radial,turn*dt*(.85+speed*6.0));projectForward();}
+  radial.addScaledVector(forward,speed*dt).normalize(); projectForward();
+  const pos=radial.clone().multiplyScalar(earthR+altitude); dragonRoot.position.copy(pos);
+  // Align model forward with travel direction. The GLB itself was previously 180° reversed,
+  // which made the dragon face the camera while moving away.
+  const m=new THREE.Matrix4().makeBasis(right.clone().negate(),radial,forward);
+  dragonRoot.quaternion.setFromRotationMatrix(m);
+  dragonRoot.rotateZ((keys.left?-.22:0)+(keys.right?.22:0));
+  if(flyAction) flyAction.timeScale=flyAnimSpeed;
+}
+function updateCamera(dt){
+  const target = dragonRoot.position.clone().addScaledVector(radial, 0.20);
+
+  if(camMode==='top'){
+    const up = radial.clone();
+    const camPos = dragonRoot.position.clone()
+      .addScaledVector(up, camDist)
+      .addScaledVector(forward, 0.2);
+    camera.position.lerp(camPos, 1-Math.exp(-dt*5.0));
+    const lookTarget = dragonRoot.position.clone().addScaledVector(forward, 0.5);
+    camera.up.copy(forward);
+    camera.lookAt(lookTarget);
+
+  } else if(camMode==='follow'){
+    const behind = forward.clone().negate().applyAxisAngle(radial, camYaw).normalize();
+    const up = radial.clone();
+    const desired = target.clone()
+      .add(behind.multiplyScalar(Math.cos(camPitch)*camDist))
+      .add(up.multiplyScalar(Math.sin(camPitch)*camDist));
+    camera.position.lerp(desired, 1-Math.exp(-dt*6.0));
+    camera.lookAt(target.clone().add(forward.clone().multiplyScalar(.85)));
+
+  } else if(camMode==='combat'){
+    // ── Over-shoulder combat camera ──────────────────────────────────────
+    // Sits close behind and just above the right shoulder, looks ahead along
+    // the dragon's forward + slight downward tilt so horizon is visible.
+    // All vectors are in world space, derived fresh from radial/forward/right
+    // every frame so the camera is fully dynamic through turns and altitude changes.
+
+    const up = radial.clone();                   // away from Earth centre
+
+    // Shoulder offset: slightly to the right and above the dragon body
+    const shoulderPos = dragonRoot.position.clone()
+      .addScaledVector(forward, -0.55)           // further behind
+      .addScaledVector(right,    0.18)           // right shoulder
+      .addScaledVector(up,       0.45);          // higher up so bars are in frame
+
+    camera.position.lerp(shoulderPos, 1 - Math.exp(-dt * 10.0));
+
+    const lookAhead = dragonRoot.position.clone()
+      .addScaledVector(forward,  1.4)            // look a bit closer ahead
+      .addScaledVector(up,       0.15);          // tilt up slightly to show bars
+
+    // camera.up = radial so horizon stays level through globe curvature
+    camera.up.copy(up);
+    camera.lookAt(lookAhead);
+  }
+}
+function addEvents(){
+  // Prevent text selection / drag artifacts while controlling neck or camera
+  canvas.addEventListener('contextmenu', e=>e.preventDefault());
+  addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight);});
+  addEventListener('keydown',e=>{
+    if(e.code==='ArrowUp')   keys.up=true;
+    if(e.code==='ArrowDown') keys.down=true;
+    if(e.code==='ArrowLeft') keys.left=true;
+    if(e.code==='ArrowRight')keys.right=true;
+    if(e.code==='KeyW')      keys.w=true;
+    if(e.code==='KeyS')      keys.s=true;
+    if(e.code==='KeyR')      resetFlight();
+    if(e.code==='KeyB')      toggleDolphinSpawnBorders();
+    if(e.code==='KeyC')      toggleClouds();
+    if(e.code==='KeyV')      toggleCollisionDebug();
+    if(e.code==='KeyM')      toggleMusic();
+    if(e.code==='KeyT'){
+      if(camMode==='top'){
+        camMode='follow'; camPitch=0.14; camDist=3.20;
+        camera.up.set(0,1,0);
+        status('Camera: Follow (T to switch)');
+      } else if(camMode==='follow'){
+        camMode='combat';
+        camera.up.set(0,1,0);
+        status('Camera: Combat — over-shoulder (T to switch)');
+      } else {
+        camMode='top'; camPitch=Math.PI/2; camDist=3.80;
+        status('Camera: Top-down (T to switch)');
+      }
+    }
+    if(e.code==='Space'){keys.space=true;e.preventDefault();}
+  });
+  addEventListener('keyup',e=>{
+    if(e.code==='ArrowUp')   keys.up=false;
+    if(e.code==='ArrowDown') keys.down=false;
+    if(e.code==='ArrowLeft') keys.left=false;
+    if(e.code==='ArrowRight')keys.right=false;
+    if(e.code==='KeyW')      keys.w=false;
+    if(e.code==='KeyS')      keys.s=false;
+    if(e.code==='Space'){keys.space=false;e.preventDefault();}
+  });
+  // Mouse drag: in top-down mode rotates the overhead view (camYaw only)
+  // In follow mode: yaw + pitch orbit
+  canvas.addEventListener('mousedown',e=>{
+    dragging=true; mx=e.clientX; my=e.clientY;
+    // Left click fires, but only in combat camera mode — in top/follow modes a
+    // left click is just the start of a camera-orbit drag, not a fire command.
+    if(e.button===0 && camMode==='combat'){ keys.space=true; }
+  });
+  addEventListener('mouseup',e=>{
+    dragging=false;
+    if(e.button===0){ keys.space=false; }
+  });
+  addEventListener('mousemove',e=>{
+    const dx=e.clientX-mx, dy=e.clientY-my;
+    mx=e.clientX; my=e.clientY;
+
+    if(camMode==='combat'){
+      // Guard against huge dx/dy on the very first move after switching modes
+      const safeDx = clamp(dx, -40, 40), safeDy = clamp(dy, -40, 40);
+      // Combat mode: neck follows raw mouse movement continuously — no drag/click needed
+      neckYaw   = clamp(neckYaw   - safeDx*0.004, -NECK_YAW_MAX,   NECK_YAW_MAX);
+      neckPitch = clamp(neckPitch + safeDy*0.004, -NECK_PITCH_MAX, NECK_PITCH_MAX);
+    } else if(dragging){
+      // Top/follow modes: orbit camera only while dragging (click+drag)
+      camYaw -= dx*0.006;
+      if(camMode==='follow') camPitch=clamp(camPitch+dy*0.004,-.35,.85);
+      if(camMode==='top')    camDist=clamp(camDist+dy*0.012,1.45,12.0);
+    }
+  });
+  // Wheel: zoom in/out in both modes
+  canvas.addEventListener('wheel',e=>{
+    e.preventDefault();
+    camDist=clamp(camDist+e.deltaY*0.004, 1.45, 12.0);
+  },{passive:false});
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// POLAR SNOW SYSTEM
+// ════════════════════════════════════════════════════════════════════════════
+
+// ── Polar zone definitions ───────────────────────────────────────────────
+// Each zone: { name, lat, lon, radius (deg), hemisphere: 'N'|'S' }
+// These are the snow-bearing regions: arctic, greenland, canada, etc.
+
+
+// ════════════════════════════════════════════════════════════════════════════
+
+// ── Cone vs sphere intersection ───────────────────────────────────────────
+// Returns true if sphere (centre, radius) intersects the cone defined by
+// (tip, direction, halfAngle, length). Uses closest-point-on-ray to sphere.
+function coneHitsSphere(tip, dir, halfAngle, coneLen, sphereCentre, sphereR){
+  const toSphere = sphereCentre.clone().sub(tip);
+  // Project onto cone axis
+  const proj = toSphere.dot(dir);
+  // Clamp to cone length
+  if(proj < -sphereR || proj > coneLen + sphereR) return false;
+  // Distance from axis
+  const closest = tip.clone().addScaledVector(dir, Math.max(0, Math.min(proj, coneLen)));
+  const distToAxis = closest.distanceTo(sphereCentre);
+  // Cone radius at this depth
+  const coneR = Math.tan(halfAngle) * Math.max(0, Math.min(proj, coneLen));
+  return distToAxis < coneR + sphereR;
+}
+// ENEMY DRAGON SYSTEM
+// ════════════════════════════════════════════════════════════════════════════
+
+function makeEnemyFireCone(){
+  const cone = makeFireCone(0xff6600);
+  cone.name = 'enemyFireCone';
+  return cone;
+}
+
+let enemyFireCone = null;
+let playerFireCone = null;
+
+function makeFireCone(color){
+  // Geometry matches FIRE_CONE_LEN/FIRE_CONE_RAD exactly — derived once from the actual
+  // widest fire flipbook plane (see the FIRE_CONE_* block near the top of the file),
+  // so this debug/visual cone always represents the true hit-test volume.
+  const geo = new THREE.ConeBufferGeometry(FIRE_CONE_RAD, FIRE_CONE_LEN, 12, 1, true);
+  // ConeBufferGeometry: tip at +Y/2, base at -Y/2
+  // Translate down so tip sits at Y=0, base at -FIRE_CONE_LEN (opens in -Y direction)
+  // We will orient the cone so its -Y axis points along fire direction (forward)
+  geo.translate(0, -FIRE_CONE_LEN/2, 0); // tip at Y=0, base at Y=-FIRE_CONE_LEN
+  const mat = new THREE.MeshBasicMaterial({
+    color, transparent:true, opacity:0.0,
+    blending:THREE.AdditiveBlending, depthWrite:false, side:THREE.DoubleSide,
+  });
+  return new THREE.Mesh(geo, mat);
+}
+
+function initEnemyDragon(){
+  // Root object for enemy — placed on the sphere like dragonRoot
+  enemyRoot = new THREE.Group();
+  enemyRoot.name = 'enemyDragonRoot';
+  scene.add(enemyRoot);
+
+  // Place opposite side of globe initially
+  eRadial.set(-0.20, 0.55, -0.81).normalize();
+  eForward.set(0,0,-1);
+  eProjectForward();
+  const pos = eRadial.clone().multiplyScalar(earthR + eAltitude);
+  enemyRoot.position.copy(pos);
+
+  // Fire cone visual
+  enemyFireCone = makeEnemyFireCone();
+  enemyFireCone.visible = false;
+  scene.add(enemyFireCone);
+
+  // Player fire cone — same geometry, slightly more yellow-orange tint
+  playerFireCone = makeFireCone(0xff9900);
+  playerFireCone.name = 'playerFireCone';
+  playerFireCone.visible = false;
+  scene.add(playerFireCone);
+
+  // Enemy uses the same loaded dragon model as the player — wait for loadDragon()'s
+  // fetch to finish (or use it immediately if it already has), then clone it via
+  // SkeletonUtils, instead of issuing a second independent GLTFLoader.load() for
+  // the same 33MB file. This used to decode all 4 embedded textures and rebuild
+  // the 219-bone skeleton a second time, on every single page load, for no benefit
+  // since the enemy and player render the identical geometry/textures anyway —
+  // only the red tint below is genuinely enemy-specific.
+  status('Loading enemy dragon...');
+  onDragonTemplateReady((template, animations)=>{
+    enemyRoot.clear();
+    enemyVisual=(THREE.SkeletonUtils&&THREE.SkeletonUtils.clone)?THREE.SkeletonUtils.clone(template):template.clone(true);
+
+    // Tint enemy red so it's visually distinct. IMPORTANT: SkeletonUtils.clone
+    // reuses materials BY REFERENCE (only geometry/bones are deep-cloned) — per
+    // the three.js docs, "other data, like geometries and materials, are reused
+    // by reference". Mutating a shared material's color here would also recolor
+    // the player's dragon, since both clones would point at the literal same
+    // Material instance. Each mesh's material is explicitly cloned first so the
+    // enemy gets its own independent copy to tint.
+    enemyVisual.traverse(o=>{
+      if(o.isMesh){
+        // Defensively re-assert (matches the existing dolphin clone pattern at
+        // createDolphinInstance) rather than relying solely on these having
+        // propagated correctly from the template through SkeletonUtils.clone's
+        // internal source.clone() — cheap, and removes one assumption.
+        o.frustumCulled=false;
+        o.castShadow=true;
+        o.receiveShadow=false;
+        if(Array.isArray(o.material)) o.material=o.material.map(m=>m?m.clone():m);
+        else if(o.material) o.material=o.material.clone();
+        const mats=Array.isArray(o.material)?o.material:[o.material];
+        mats.forEach(m=>{
+          if(!m) return;
+          if(m.color) m.color.set(0x8b1a1a);
+          m.needsUpdate=true;
+        });
+        // customDepthMaterial was set on the shared template's mesh (by reference
+        // through traverse, since meshes themselves ARE deep-cloned by
+        // SkeletonUtils — only material/geometry data is shared) — give the
+        // enemy its own depth material too, for the same reason as above.
+        if(o.isSkinnedMesh){
+          o.customDepthMaterial=new THREE.MeshDepthMaterial({depthPacking:THREE.RGBADepthPacking});
+          o.customDepthMaterial.skinning=true;
+          o.customDepthMaterial.side=THREE.DoubleSide;
+        }
+      }
+    });
+    enemyRoot.add(enemyVisual);
+    enemyMouthBone = findMouthBone(enemyVisual);
+    enemyWingBones = findWingBones(enemyVisual);
+    enemyCapsuleBones = findCapsuleBones(enemyVisual);
+
+    // Fire breath — reuse same material factory
+    makeEnemyFireBreath();
+
+    if(animations&&animations.length){
+      enemyMixer=new THREE.AnimationMixer(enemyVisual);
+      const fly=animations.find(c=>/fly/i.test(c.name))||animations[0];
+      enemyAction=enemyMixer.clipAction(fly);
+      enemyAction.play();
+    }
+    status('Enemy dragon loaded');
+  });
+}
+
+function makeEnemyFireBreath(){
+  if(enemyFire && enemyFire.parent) enemyFire.parent.remove(enemyFire);
+  const loader = new THREE.TextureLoader();
+  const side=loader.load(ASSET.fireSide), iso=loader.load(ASSET.fireIso), topTex=loader.load(ASSET.fireTop);
+  [side,iso,topTex].forEach(t=>{
+    t.encoding=THREE.sRGBEncoding; t.wrapS=t.wrapT=THREE.RepeatWrapping;
+    t.magFilter=THREE.LinearFilter; t.minFilter=THREE.LinearMipMapLinearFilter;
+    t.repeat.set(1/8,1/8);
+  });
+  enemyFire = new THREE.Group(); enemyFire.name='EnemyFire'; enemyFire.visible=false;
+  enemyFire.rotation.copy(FIRE_BONE_LOCAL_ROTATION);
+  enemyFire.scale.setScalar(FIRE_BONE_SCALE);
+
+  const sA=makeFireFlipbookMaterial(side,{intensity:1.55,alphaBoost:1.0});
+  const sB=makeFireFlipbookMaterial(side,{intensity:1.28,alphaBoost:0.78});
+  const iM=makeFireFlipbookMaterial(iso, {intensity:1.34,alphaBoost:0.82});
+  const tM=makeFireFlipbookMaterial(topTex,{intensity:1.42,alphaBoost:0.78});
+  enemyFireMats=[sA,sB,iM,tM];
+  addFirePlane(enemyFire,'ef-side-main',  1.55,2.65,sA,[0,1.18,0],[0,0,0],220);
+  addFirePlane(enemyFire,'ef-side-cross', 1.32,2.45,sB,[0,1.10,0],[0,Math.PI/2,0],221);
+  addFirePlane(enemyFire,'ef-iso-diag',   1.68,2.55,iM,[0,1.14,0],[0,Math.PI/4,0],222);
+  addFirePlane(enemyFire,'ef-top-length', 1.45,2.42,tM,[0,1.08,0],[0,-Math.PI/4,0],223);
+  scene.add(enemyFire);
+}
+
+function eProjectForward(){
+  eForward.addScaledVector(eRadial,-eForward.dot(eRadial)).normalize();
+  eRight.crossVectors(eForward,eRadial).normalize();
+}
+
+function updateEnemyDragon(dt, t){
+  if(!enemyRoot) return;
+
+  // ── AI: track player using shortest arc on sphere ─────────────────────
+  const playerPos = dragonRoot.position.clone().normalize(); // direction on sphere
+  const enemyPos  = eRadial.clone();
+
+  // Shortest arc: rotate eForward toward player direction, projected to tangent plane
+  const toPlayer = playerPos.clone().addScaledVector(enemyPos, -playerPos.dot(enemyPos)).normalize();
+  const dotFwd   = eForward.dot(toPlayer);
+  const crossY   = new THREE.Vector3().crossVectors(eForward, toPlayer).dot(eRadial);
+
+  // Turn rate — how fast enemy steers toward player
+  const turnRate = 0.8 + eSpeed*4.0;
+  const turnSign = crossY > 0 ? 1 : -1;
+  const turnAmt  = Math.min(Math.abs(crossY)*turnRate, turnRate)*dt * turnSign;
+  eForward.applyAxisAngle(eRadial, turnAmt);
+  eProjectForward();
+
+  // ── Altitude: aim fire cone at player ────────────────────────────────
+  // Compute where the player is relative to enemy mouth in the radial direction.
+  // Enemy needs to be at an altitude so that the vertical angle to player
+  // falls within FIRE_CONE_ANGLE. We bias toward being slightly ABOVE the player
+  // so the cone naturally sweeps down onto them.
+  const playerAlt  = altitude;
+  const altError   = playerAlt - eAltitude;  // +ve means player is above us
+  // Aim to sit at player altitude + slight upward bias so cone points down at them
+  const altTarget  = playerAlt + 0.05;
+  const altDiff    = altTarget - eAltitude;
+  eAltitude = clamp(eAltitude + altDiff * dt * 1.8, minAlt, maxAlt);
+
+  // ── Move forward at constant speed ────────────────────────────────────
+  eRadial.addScaledVector(eForward, eSpeed*dt).normalize();
+  eProjectForward();
+  enemyRoot.position.copy(eRadial.clone().multiplyScalar(earthR + eAltitude));
+
+  // ── Orient enemy mesh ─────────────────────────────────────────────────
+  const em = new THREE.Matrix4().makeBasis(eRight.clone().negate(), eRadial, eForward);
+  enemyRoot.quaternion.setFromRotationMatrix(em);
+
+  if(enemyMixer) enemyMixer.update(dt);
+
+  // ── Distance and angle to player ──────────────────────────────────────
+  const distToPlayer = enemyRoot.position.distanceTo(dragonRoot.position);
+
+  // Direction from enemy mouth toward player
+  const eMouthPos = enemyRoot.position.clone()
+    .addScaledVector(eForward, 0.32)
+    .addScaledVector(eRadial,  0.34);
+  const toPlayerWorld = dragonRoot.position.clone().sub(eMouthPos).normalize();
+  const angleToPlayer = Math.acos(clamp(eForward.dot(toPlayerWorld), -1, 1));
+
+  // ── AI fire decision ──────────────────────────────────────────────────
+  eFireTimer -= dt;
+  if(eFireTimer <= 0 && enemyFireMeter > 10 && distToPlayer < FIRE_CONE_RANGE * 1.2 && angleToPlayer < FIRE_CONE_ANGLE * 1.5){
+    eIsFiring    = true;
+    eFireDuration= 1.5 + Math.random()*1.5;
+    eFireTimer   = 4.0 + Math.random()*4.0;
+  }
+  if(eIsFiring){
+    eFireDuration -= dt;
+    if(eFireDuration <= 0 || enemyFireMeter <= 0) eIsFiring = false;
+  }
+
+  // ── Enemy fire meter — identical drain/refill rules as player ──────────
+  if(eIsFiring && enemyFireMeter > 0){
+    enemyFireMeter = Math.max(0, enemyFireMeter - FIRE_DRAIN_RATE*dt);
+    eFireLastUsed = t;
+    if(enemyFireMeter <= 0) eIsFiring = false;
+  } else if(t - eFireLastUsed > FIRE_REFILL_DELAY){
+    enemyFireMeter = Math.min(100, enemyFireMeter + FIRE_REFILL_RATE*dt);
+  }
+
+  // ── Update enemy fire breath (same as player) ─────────────────────────
+  const visTarget = eIsFiring ? 1.0 : 0.0;
+  let anyFireVisible = false;
+  const fps=26, offsets=[0,13,29,7];
+  for(let i=0;i<enemyFireMats.length;i++){
+    const m=enemyFireMats[i];
+    m.uniforms.frame.value = Math.floor(t*fps+offsets[i])%64;
+    m.uniforms.time.value  = t;
+    m.uniforms.wind.value  = 0.10+0.04*Math.sin(t*2.1);
+    const cur = m.uniforms.visibility.value;
+    m.uniforms.visibility.value = cur + (visTarget-cur)*0.36;
+    if(m.uniforms.visibility.value > 0.02) anyFireVisible=true;
+  }
+  if(enemyFire){
+    enemyFire.visible = anyFireVisible;
+    if(enemyMouthBone){
+      enemyMouthBone.updateWorldMatrix(true,false);
+      enemyMouthBone.getWorldPosition(enemyFireWorldPos);
+      enemyMouthBone.getWorldQuaternion(enemyFireWorldQuat);
+      const offset = FIRE_BONE_LOCAL_OFFSET.clone().applyQuaternion(enemyFireWorldQuat);
+      enemyFire.position.copy(enemyFireWorldPos).add(offset);
+      enemyFire.quaternion.copy(enemyFireWorldQuat).multiply(_fireLocalRotQuat);
+      enemyFire.scale.setScalar(FIRE_BONE_SCALE);
+    }
+  }
+
+  // ── Fire cone visual — wraps the actual fire mesh exactly ──────────────
+  if(enemyFireCone){
+    enemyFireCone.visible = eIsFiring;
+    if(eIsFiring && enemyFire){
+      // Use the EXACT same world position and direction as the visual fire flipbook
+      enemyFireCone.position.copy(enemyFire.position);
+      const eFireFwd = new THREE.Vector3(0,1,0).applyQuaternion(enemyFire.quaternion).normalize();
+      enemyFireCone.quaternion.setFromUnitVectors(new THREE.Vector3(0,-1,0), eFireFwd);
+      enemyFireCone.material.opacity = 0.18 + 0.12*Math.sin(t*12);
+      enemyFireCone.userData.fireFwd = eFireFwd; // cache for damage check
+    }
+  }
+
+  // ── Damage: enemy fire cone vs player capsule spheres ───────────────────
+  if(eIsFiring && enemyFire){
+    const eMouthPos2 = enemyFire.position.clone(); // exact fire mesh origin
+    const eFireDir = (enemyFireCone && enemyFireCone.userData.fireFwd) ? enemyFireCone.userData.fireFwd : eForward;
+    let hit = false;
+    if(playerCapsuleBones){
+      const pSpheres = getDragonCapsuleSpheres(playerCapsuleBones, dragonRoot, _playerCapsuleScratch);
+      for(let i=0;i<pSpheres.length;i++){
+        if(coneHitsSphere(eMouthPos2, eFireDir, FIRE_CONE_ANGLE, FIRE_CONE_LEN, pSpheres[i].center, pSpheres[i].radius)){ hit=true; break; }
+      }
+    }
+    if(!hit && playerWingBones){
+      const pWings = getWingCapsuleSpheres(playerWingBones, _playerWingScratch);
+      for(let i=0;i<pWings.length;i++){
+        if(coneHitsSphere(eMouthPos2, eFireDir, FIRE_CONE_ANGLE, FIRE_CONE_LEN, pWings[i].center, pWings[i].radius)){ hit=true; break; }
+      }
+    }
+    if(hit){
+      playerHP = Math.max(0, playerHP - 5.0 * dt);
+    }
+  }
+
+  // ── Dragon–dragon collision: push apart if overlapping ───────────────
+  // Full-capsule version: tests every body/tail/head/wing sphere of one dragon
+  // against every sphere of the other (see findDeepestDragonOverlap), so wings
+  // pushing apart side-by-side dragons is handled the same as bodies colliding
+  // head-on — the old version only ever compared root-to-root distance, which
+  // missed wingtip overlap entirely (wings reach ~0.44 units from root, well
+  // past the old 0.65 root-distance threshold once you account for both dragons'
+  // wings extending toward each other). distToPlayer gates a cheap early-out:
+  // skip the full sweep unless the dragons are even plausibly close enough for
+  // any sphere pair to reach (DRAGON_OVERLAP_CHECK_DIST, derived from the
+  // largest real sphere reach on the mesh).
+  if(distToPlayer < DRAGON_OVERLAP_CHECK_DIST){
+    const overlap = findDeepestDragonOverlap(
+      dragonRoot, playerCapsuleBones, playerWingBones,
+      enemyRoot, enemyCapsuleBones, enemyWingBones
+    );
+    if(overlap){
+      // Push vector: from the overlapping enemy sphere toward the overlapping
+      // player sphere (not root-to-root), so the push direction matches whichever
+      // body part — wing, body, or tail — is actually intersecting.
+      const pushDir = overlap.centerA.clone().sub(overlap.centerB).normalize();
+      const pushAmt = overlap.depth * 0.5; // split push equally
+
+      // Push player away along sphere surface (project onto tangent plane)
+      const playerPush = pushDir.clone().addScaledVector(radial, -pushDir.dot(radial)).normalize();
+      radial.addScaledVector(playerPush, pushAmt * 0.8).normalize();
+      projectForward();
+      dragonRoot.position.copy(radial.clone().multiplyScalar(earthR + altitude));
+
+      // Push enemy the opposite way
+      const enemyPush = pushDir.clone().negate().addScaledVector(eRadial, -pushDir.dot(eRadial)).normalize();
+      eRadial.addScaledVector(enemyPush, pushAmt * 0.8).normalize();
+      eProjectForward();
+      enemyRoot.position.copy(eRadial.clone().multiplyScalar(earthR + eAltitude));
+    }
+  }
+
+  // ── Enemy death: reset when HP reaches 0 ────────────────────────────
+  if(enemyHP <= 0){
+    enemyHP = 100;
+    enemyFireMeter = 100;
+    // Respawn enemy on opposite side of globe
+    eRadial.copy(radial).negate().normalize();
+    eForward.set(Math.random()-0.5, Math.random()-0.5, Math.random()-0.5)
+            .addScaledVector(eRadial,-eForward.dot(eRadial)).normalize();
+    eProjectForward();
+    enemyRoot.position.copy(eRadial.clone().multiplyScalar(earthR + eAltitude));
+    const flash = document.getElementById('lightningFlash');
+    if(flash){ flash.style.background='#ff0'; flash.style.opacity='0.25'; }
+    setTimeout(()=>{ if(flash) flash.style.opacity='0'; }, 500);
+    status('Enemy dragon defeated — respawning...');
+  }
+
+  // ── HUD ───────────────────────────────────────────────────────────────
+  const enemyHudEl = document.getElementById('enemyIndicator');
+  if(enemyHudEl){
+    const dist = Math.round(distToPlayer*100)/100;
+    enemyHudEl.style.display = 'block';
+    enemyHudEl.textContent   = (eIsFiring?'🔥':'🔴')+' ENEMY  dist:'+dist.toFixed(1);
+    enemyHudEl.style.color   = distToPlayer < 2.0 ? '#f44' : '#f88';
+  }
+}
+
+// ── Player fire meter and HP update ──────────────────────────────────────
+// ── Canvas overlay for floating bars ─────────────────────────────────────
+const _statCanvas = document.getElementById('statCanvas');
+const _statCtx    = _statCanvas ? _statCanvas.getContext('2d') : null;
+
+// Project 3D world position to screen pixel coords
+function worldToScreen(pos){
+  const v = pos.clone().project(camera);
+  return {
+    x: (v.x * 0.5 + 0.5) * window.innerWidth,
+    y: (-(v.y) * 0.5 + 0.5) * window.innerHeight,
+    z: v.z,   // -1..1, >1 = behind camera
+  };
+}
+
+function drawFloatingBar(ctx, sx, sy, pct, color, bgColor, w, h){
+  const r = h / 2; // fully pill-shaped
+  const x = sx - w/2;
+
+  // Outer shadow/border
+  ctx.save();
+  ctx.shadowColor = 'rgba(0,0,0,0.7)';
+  ctx.shadowBlur  = 4;
+  ctx.fillStyle   = 'rgba(0,0,0,0.65)';
+  _roundRect(ctx, x-1, sy-1, w+2, h+2, r+1);
+  ctx.fill();
+  ctx.restore();
+
+  // Background track
+  ctx.fillStyle = bgColor;
+  _roundRect(ctx, x, sy, w, h, r);
+  ctx.fill();
+
+  // Fill (clipped to pill shape so it can't overflow corners)
+  if(pct > 0){
+    ctx.save();
+    ctx.beginPath();
+    _roundRect(ctx, x, sy, w, h, r);
+    ctx.clip();
+    ctx.fillStyle = color;
+    ctx.fillRect(x, sy, w*(pct/100), h);
+    ctx.restore();
+  }
+}
+
+// Cross-browser rounded rect helper (ctx.roundRect not available everywhere)
+function _roundRect(ctx, x, y, w, h, r){
+  r = Math.min(r, w/2, h/2);
+  ctx.beginPath();
+  ctx.moveTo(x+r, y);
+  ctx.lineTo(x+w-r, y);
+  ctx.arcTo(x+w, y,   x+w, y+r,   r);
+  ctx.lineTo(x+w, y+h-r);
+  ctx.arcTo(x+w, y+h, x+w-r, y+h, r);
+  ctx.lineTo(x+r, y+h);
+  ctx.arcTo(x, y+h, x, y+h-r, r);
+  ctx.lineTo(x, y+r);
+  ctx.arcTo(x, y,   x+r, y,   r);
+  ctx.closePath();
+}
+
+function updatePlayerStats(dt, t){
+  // ── Fire meter logic ──────────────────────────────────────────────────
+  if(keys.space && playerFire > 0){
+    playerFire = Math.max(0, playerFire - FIRE_DRAIN_RATE*dt);
+    fireLastUsed = t;
+    if(playerFire <= 0) keys.space = false;
+  } else if(t - fireLastUsed > FIRE_REFILL_DELAY){
+    playerFire = Math.min(100, playerFire + FIRE_REFILL_RATE*dt);
+  }
+
+  // ── Death ─────────────────────────────────────────────────────────────
+  if(playerHP <= 0){
+    const flash = document.getElementById('lightningFlash');
+    if(flash){ flash.style.background='#f00'; flash.style.opacity='0.5'; }
+    setTimeout(()=>{ if(flash) flash.style.opacity='0'; }, 800);
+    playerHP = 100;
+    playerFire = 100;
+    resetFlight();
+  }
+
+  // ── Canvas floating bars ──────────────────────────────────────────────
+  if(!_statCtx) return;
+  _statCanvas.width  = window.innerWidth;
+  _statCanvas.height = window.innerHeight;
+  _statCtx.clearRect(0, 0, _statCanvas.width, _statCanvas.height);
+
+  const BAR_W = 56, BAR_H = 5, GAP = 3, LIFT = 28;
+
+  // Player bars — above dragonRoot projected to screen
+  if(dragonRoot){
+    const abovePlayer = dragonRoot.position.clone()
+      .addScaledVector(radial, 0.55);
+    const sp = worldToScreen(abovePlayer);
+    if(sp.z < 1.0){
+      // HP bar (green→yellow→red)
+      const hpCol = playerHP > 50 ? '#4ef04e' : playerHP > 25 ? '#ffd740' : '#f44336';
+      drawFloatingBar(_statCtx, sp.x, sp.y - LIFT,        playerHP,   hpCol,   '#1a1a1a', BAR_W, BAR_H);
+      // Fire bar (orange)
+      drawFloatingBar(_statCtx, sp.x, sp.y - LIFT + GAP + BAR_H, playerFire, '#ff9800', '#1a1a1a', BAR_W, BAR_H);
+    }
+  }
+
+  // Enemy bars — above enemyRoot
+  if(enemyRoot && enemyVisual){
+    const aboveEnemy = enemyRoot.position.clone()
+      .addScaledVector(eRadial, 0.55);
+    const se = worldToScreen(aboveEnemy);
+    if(se.z < 1.0){
+      // Same colour logic as player HP
+      const eHpCol = enemyHP > 50 ? '#4ef04e' : enemyHP > 25 ? '#ffd740' : '#f44336';
+      drawFloatingBar(_statCtx, se.x, se.y - LIFT, enemyHP, eHpCol, '#1a1a1a', BAR_W, BAR_H);
+      // Fire bar
+      const eFirePct = enemyFireMeter;
+      drawFloatingBar(_statCtx, se.x, se.y - LIFT + GAP + BAR_H, eFirePct, '#ff6600', '#1a1a1a', BAR_W, BAR_H);
+    }
+  }
+
+  // ── Enemy indicator pill ───────────────────────────────────────────────
+  const enemyHudEl = document.getElementById('enemyIndicator');
+  if(enemyHudEl && enemyRoot){
+    const dist = dragonRoot ? dragonRoot.position.distanceTo(enemyRoot.position) : 0;
+    enemyHudEl.style.display = 'block';
+    enemyHudEl.textContent   = (eIsFiring?'🔥':'🔴')+' '+dist.toFixed(1)+'u';
+  }
+}
+
+function animate(){
+  requestAnimationFrame(animate); const dt=Math.min(clock.getDelta(),.04), t=clock.elapsedTime;
+  if(earthMat){earthMat.uniforms.time.value=t;earthMat.uniforms.detailBoost.value=clamp(1.15-(altitude-.30)/1.45,0.0,1.15);} scene.traverse(o=>{if(o.userData&&o.userData.isWaterShell)o.material.uniforms.time.value=t});
+  if(mixer)mixer.update(dt); updateFlight(dt);
+  if(earthMat){earthMat.uniforms.dragonGroundDir.value.copy(radial); earthMat.uniforms.dragonShimmerStrength.value=clamp(0.70-altitude*.18,0.22,0.62); earthMat.uniforms.dragonShadowStrength.value=clamp(0.86-altitude*.22,0.28,0.74);}
+  updateShadow(t); updateFireBreath(dt,t); updateNeckLook(); updateEnemyDragon(dt,t); updatePlayerStats(dt,t); updateDolphins(dt,t); updateClouds(t); updateCloudCollision(dt); updateCloudRegrowth(dt); updateWeather(dt,t); updateCamera(dt);
+  // Phase 2: keep debug bsphere meshes in sync with drifting clouds
+  if(collisionDebug&&debugRoot){
+    // Compute both capsule and wing spheres once per frame here (independent of
+    // whether fire is active) so the debug view stays accurate even when not
+    // firing. getDragonCapsuleSpheres live-tracks real spine/tail/neck bones, so
+    // this correctly reflects the flying animation the same way the rendered
+    // mesh does (not just rigid root rotation — see DRAGON_CAPSULE's comment).
+    const debugCapsuleSpheres = playerCapsuleBones ? getDragonCapsuleSpheres(playerCapsuleBones, dragonRoot, _playerCapsuleScratch) : null;
+    const debugWingSpheres = playerWingBones ? getWingCapsuleSpheres(playerWingBones, _playerWingScratch) : null;
+    debugRoot.children.forEach(m=>{
+      if(m.userData.isBSphere&&m.userData.bsRef){
+        m.position.copy(m.userData.bsRef.currentCenter);
+      } else if(m.userData.isDragonCapsuleSphere && debugCapsuleSpheres && debugCapsuleSpheres[m.userData.capsuleIdx]){
+        m.position.copy(debugCapsuleSpheres[m.userData.capsuleIdx].center);
+      } else if(m.userData.isWingCapsuleSphere && debugWingSpheres && debugWingSpheres[m.userData.wingIdx]){
+        m.position.copy(debugWingSpheres[m.userData.wingIdx].center);
+      }
+    });
+  }
+  document.getElementById('speedH').textContent='Speed '+(speed*1000).toFixed(0); document.getElementById('altH').textContent='Altitude '+altitude.toFixed(2);
+  renderer.render(scene,camera);
+}
+document.getElementById('go').onclick=()=>{document.getElementById('start').style.display='none';document.getElementById('hud').style.display='flex';document.getElementById('hint').style.display='block';init();playMusic();};
+document.getElementById('musicH').onclick=toggleMusic;
+</script>
+</body>
+</html>
+
+<!-- cloud-bank tangent shadow fix -->
